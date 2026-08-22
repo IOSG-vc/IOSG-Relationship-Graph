@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    {"id": "iosg:jocy", "label": "Jocy", "kind": "iosg_member", "x_handle": "jocyiosg"},
+    {"id": "iosg:darko", "label": "Darko", "kind": "iosg_member", "x_handle": "darkoiosg"},
+    {"id": "person:founder", "label": "@founder", "kind": "person", "x_handle": "founder"},
+    {"id": "person:advisor", "label": "Alex Advisor", "kind": "person", "x_handle": "alexadvisor"},
+    {"id": "company:project", "label": "Project", "kind": "company", "x_handle": "projectx", "metadata": {"domain": "project.xyz", "aliases": ["Project XYZ"]}}
+  ],
+  "edges": [
+    {"id": "follow:1", "source": "iosg:jocy", "target": "person:founder", "relationship": "x_follow", "confidence": 0.35, "evidence": "Jocy follows @founder on X; this is only a weak familiarity signal.", "evidence_source": "sorsa", "observed_at": "2026-08-21T00:00:00Z"},
+    {"id": "founder:1", "source": "person:founder", "target": "company:project", "relationship": "founder_of", "confidence": 0.95, "evidence": "Surf lists @founder as Founder of Project.", "evidence_source": "surf", "observed_at": "2026-08-21T00:00:00Z"},
+    {"id": "interaction:1", "source": "iosg:darko", "target": "person:advisor", "relationship": "email_calendar_interaction", "confidence": 0.90, "evidence": "Twenty records 6 email interactions and 2 meetings; latest 2026-08-10. No contents were read or stored.", "evidence_source": "twenty", "observed_at": "2026-08-10T00:00:00Z"},
+    {"id": "company-rel:1", "source": "person:advisor", "target": "company:project", "relationship": "direct_company_relationship", "confidence": 0.82, "evidence": "Twenty has a verified advisor relationship to Project.", "evidence_source": "twenty", "observed_at": "2026-08-12T00:00:00Z"}
+  ]
+}
