@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 
 from .engine import IntroductionPathService
 from .models import SearchRequest, SearchResponse
@@ -50,6 +51,11 @@ def authorize(authorization: str | None = Header(default=None)) -> None:
 
 
 app = FastAPI(title="IOSG Relationship Graph", version="0.1.0")
+
+
+@app.get("/", include_in_schema=False)
+def web_app() -> FileResponse:
+    return FileResponse(ROOT / "web" / "index.html")
 
 
 @app.get("/health")

@@ -49,3 +49,10 @@ def test_readiness_for_fixture(monkeypatch):
     response = TestClient(app).get("/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "backend": "fixture"}
+
+
+def test_web_app_is_served():
+    response = TestClient(app).get("/")
+    assert response.status_code == 200
+    assert "IOSG Relationship Graph" in response.text
+    assert "Find paths" in response.text
