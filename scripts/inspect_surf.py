@@ -13,15 +13,14 @@ import requests
 from dotenv import load_dotenv
 
 SURF_PROJECT_DETAIL_URL = "https://api.asksurf.ai/gateway/v1/project/detail"
-USED_FIELDS = ("team", "funding")
+USED_FIELDS = ("search", "team", "funding")
 
 
-def project_detail(api_key: str, handle: str, field: str, timeout: int) -> dict[str, Any]:
+def get_json(api_key: str, url: str, params: dict[str, Any], timeout: int) -> dict[str, Any]:
     response = requests.get(
-        SURF_PROJECT_DETAIL_URL,
+        url,
         headers={"Authorization": f"Bearer {api_key}"},
-        params={"handle": handle.lstrip("@"), "fields": field},
-        timeout=timeout,
+        params=params, timeout=timeout,
     )
     print(f"\nGET {response.url}")
     print(f"HTTP {response.status_code}")
@@ -34,6 +33,18 @@ def project_detail(api_key: str, handle: str, field: str, timeout: int) -> dict[
     print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     response.raise_for_status()
     return payload
+
+
+def search_project(api_key: str, query: str, timeout: int) -> dict[str, Any]:
+    return get_json(
+        api_key, "https://api.asksurf.ai/gateway/v1/search/project",
+        {"q": query.lstrip("@"), "limit": 5}, timeout,
+    )
+
+
+def project_detail(api_key: str, project_ref: str, field: str, timeout: int) -> dict[str, Any]:
+    lookup = "id" if len(project_ref) == 36 and project_ref.count("-") == 4 else "q"
+    return get_json(api_key, SURF_PROJECT_DETAIL_URL, {lookup: project_ref, "fields": field}, timeout)
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,8 +69,15 @@ def main() -> int:
         return 2
     fields = USED_FIELDS if args.field == "all" else (args.field,)
     try:
+        project_ref = args.handle.lstrip("@")
         for field in fields:
-            project_detail(api_key, args.handle, field, args.timeout)
+            if field == "search":
+                payload = search_project(api_key, args.handle, args.timeout)
+                results = payload.get("data") or []
+                if results:
+                    project_ref = str(results[0]["id"])
+            else:
+                project_detail(api_key, project_ref, field, args.timeout)
     except requests.RequestException as exc:
         print(f"Surf request failed: {exc}", file=sys.stderr)
         return 1

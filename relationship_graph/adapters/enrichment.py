@@ -26,33 +26,53 @@ class SurfClient:
         self.api_key = api_key
         self.timeout = timeout
 
-    def team(self, project_handle: str) -> list[dict[str, Any]]:
-        if not self.api_key or not project_handle:
-            return []
+    def search_project(self, query: str) -> dict[str, Any] | None:
+        if not self.api_key or not query:
+            return None
         response = requests.get(
-            "https://api.asksurf.ai/gateway/v1/project/detail",
+            "https://api.asksurf.ai/gateway/v1/search/project",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            params={"handle": normalize_handle(project_handle), "fields": "team"},
-            timeout=self.timeout,
+            params={"q": query, "limit": 5}, timeout=self.timeout,
         )
-        if response.status_code == 404:
-            return []
         response.raise_for_status()
-        return ((response.json().get("data") or {}).get("team") or {}).get("members") or []
+        return select_surf_project(response.json().get("data") or [], query)
 
-    def funding(self, project_handle: str) -> dict[str, Any]:
-        if not self.api_key or not project_handle:
+    def _project_detail(self, project_ref: str, field: str) -> dict[str, Any]:
+        if not self.api_key or not project_ref:
             return {}
+        lookup = "id" if re.fullmatch(r"[0-9a-fA-F-]{36}", project_ref) else "q"
         response = requests.get(
             "https://api.asksurf.ai/gateway/v1/project/detail",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            params={"handle": normalize_handle(project_handle), "fields": "funding"},
-            timeout=self.timeout,
+            params={lookup: project_ref, "fields": field}, timeout=self.timeout,
         )
         if response.status_code == 404:
             return {}
         response.raise_for_status()
-        return (response.json().get("data") or {}).get("funding") or {}
+        return response.json().get("data") or {}
+
+    def team(self, project_ref: str) -> list[dict[str, Any]]:
+        if not self.api_key or not project_ref:
+            return []
+        return (self._project_detail(project_ref, "team").get("team") or {}).get("members") or []
+
+    def funding(self, project_ref: str) -> dict[str, Any]:
+        if not self.api_key or not project_ref:
+            return {}
+        return self._project_detail(project_ref, "funding").get("funding") or {}
+
+
+def select_surf_project(projects: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+    if not projects:
+        return None
+    needle = re.sub(r"[^a-z0-9]", "", query.casefold().lstrip("@"))
+
+    def rank(project: dict[str, Any]) -> tuple[int, str]:
+        values = (project.get("name"), project.get("slug"), project.get("symbol"))
+        normalized = {re.sub(r"[^a-z0-9]", "", str(value or "").casefold()) for value in values}
+        return (0 if needle in normalized else 1, str(project.get("name") or ""))
+
+    return min(projects, key=rank)
 
 
 def funding_investors(funding: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
@@ -267,6 +287,40 @@ class NeonFollowProvider:
             )
         return len(rows)
 
+    def store_project_identity(self, company_id: str, company_name: str,
+                               project: dict[str, Any]) -> None:
+        import psycopg2
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                create table if not exists deals.x_company_source_identity (
+                    company_id text not null,
+                    company_name text not null,
+                    source text not null,
+                    source_project_id text not null,
+                    canonical_name text,
+                    source_slug text,
+                    first_seen timestamptz not null default now(),
+                    last_confirmed timestamptz not null default now(),
+                    primary key (company_id, source)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                insert into deals.x_company_source_identity (
+                    company_id, company_name, source, source_project_id, canonical_name, source_slug
+                ) values (%s, %s, 'surf', %s, %s, %s)
+                on conflict (company_id, source) do update set
+                    company_name = excluded.company_name,
+                    source_project_id = excluded.source_project_id,
+                    canonical_name = excluded.canonical_name,
+                    source_slug = excluded.source_slug,
+                    last_confirmed = now()
+                """,
+                (company_id, company_name, project["id"], project.get("name"), project.get("slug")),
+            )
+
     def sync_status(self) -> dict[str, Any]:
         if not self.database_url:
             return {"status": "not_configured"}
@@ -377,9 +431,34 @@ class EnrichedGraphRepository:
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["neon"] = {"status": "error", "error": type(exc).__name__}
         surf_handle = target.x_handle or re.sub(r"[^a-z0-9_]", "", target.label.casefold())
-        if self.surf and surf_handle and not neon_people:
+        surf_project = None
+        surf_ref = surf_handle
+        if self.surf and hasattr(self.surf, "search_project"):
             try:
-                members = surf_members if surf_members is not None else self.surf.team(surf_handle)
+                surf_project = self.surf.search_project(target.label)  # type: ignore[attr-defined]
+                if surf_project:
+                    surf_ref = str(surf_project["id"])
+                    surf_handle = str(surf_project.get("slug") or surf_handle)
+                    target.metadata.update({
+                        "surf_project_id": surf_ref,
+                        "surf_canonical_name": surf_project.get("name"),
+                        "surf_slug": surf_project.get("slug"),
+                    })
+                    if self.follows and hasattr(self.follows, "store_project_identity"):
+                        company_id = str(target.metadata.get("source_record_id") or target.id)
+                        self.follows.store_project_identity(  # type: ignore[attr-defined]
+                            company_id, target.label, surf_project,
+                        )
+                self._source_diagnostics["surf_identity"] = {
+                    "status": "ok" if surf_project else "not_found",
+                    "project_id": surf_project.get("id") if surf_project else None,
+                    "canonical_name": surf_project.get("name") if surf_project else None,
+                }
+            except Exception as exc:  # noqa: BLE001
+                self._source_diagnostics["surf_identity"] = {"status": "error", "error": type(exc).__name__}
+        if self.surf and surf_ref and not neon_people:
+            try:
+                members = surf_members if surf_members is not None else self.surf.team(surf_ref)
                 self._add_surf_team(target, members)
                 stored = 0
                 if members and self.follows and hasattr(self.follows, "store_company_people"):
@@ -394,9 +473,9 @@ class EnrichedGraphRepository:
                 self._source_diagnostics["surf"] = {"status": "error", "error": type(exc).__name__}
         elif neon_people:
             self._source_diagnostics["surf"] = {"status": "cached_in_neon", "team_members": len(neon_people)}
-        if self.surf and surf_handle and hasattr(self.surf, "funding"):
+        if self.surf and surf_ref and hasattr(self.surf, "funding"):
             try:
-                investors = funding_investors(self.surf.funding(surf_handle))  # type: ignore[attr-defined]
+                investors = funding_investors(self.surf.funding(surf_ref))  # type: ignore[attr-defined]
                 stored_investors = 0
                 company_id = str(target.metadata.get("source_record_id") or target.id)
                 if investors and self.follows and hasattr(self.follows, "store_company_investors"):

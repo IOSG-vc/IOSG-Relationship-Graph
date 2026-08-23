@@ -1,4 +1,4 @@
-from relationship_graph.adapters.enrichment import EnrichedGraphRepository, funding_investors
+from relationship_graph.adapters.enrichment import EnrichedGraphRepository, funding_investors, select_surf_project
 from relationship_graph.engine import IntroductionPathService
 from relationship_graph.models import Edge, Node, QueryKind
 
@@ -129,3 +129,11 @@ def test_funding_investors_prefers_leads_and_deduplicates_funds():
     investors = funding_investors(funding)
     assert [item["name"] for item in investors] == ["Fund One", "Fund Two"]
     assert investors[0]["round_name"] == "Series A"
+
+
+def test_surf_project_selection_prefers_exact_slug_after_rebrand():
+    projects = [
+        {"id": "wrong", "name": "Eigen Something", "slug": "eigen-something"},
+        {"id": "right", "name": "EigenCloud", "slug": "eigenlayer"},
+    ]
+    assert select_surf_project(projects, "EigenLayer")["id"] == "right"

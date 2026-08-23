@@ -63,10 +63,11 @@ from `deals.iosg_x_following`. Those snapshots are expected to be synchronized f
 out of band; the request path does not download complete following lists. PostgreSQL support
 is included in the standard installation; use `pip install -e '.[dev]'` for development tools.
 
-To inspect the raw Surf responses used by the app (`team` and `funding`), run:
+To inspect the raw Surf responses used by the app (`search`, `team`, and `funding`), run:
 
 ```bash
 python scripts/inspect_surf.py eigenlayer
+python scripts/inspect_surf.py eigenlayer --field search
 python scripts/inspect_surf.py @eigenlayer --field team
 python scripts/inspect_surf.py eigenlayer --field funding
 ```
