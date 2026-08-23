@@ -67,3 +67,9 @@ def test_api_does_not_require_app_level_key(monkeypatch):
 def test_vercel_function_allows_live_search_duration():
     config = json.loads((FIXTURE.parent.parent / "vercel.json").read_text())
     assert config["functions"]["api/index.py"]["maxDuration"] >= 60
+
+
+def test_neon_driver_is_a_runtime_dependency():
+    project = (FIXTURE.parent.parent / "pyproject.toml").read_text()
+    dependencies = project.split("[project.optional-dependencies]", 1)[0]
+    assert "psycopg2-binary" in dependencies

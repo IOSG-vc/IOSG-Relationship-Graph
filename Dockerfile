@@ -6,7 +6,7 @@ COPY pyproject.toml README.md ./
 COPY relationship_graph relationship_graph
 COPY fixtures fixtures
 COPY web web
-RUN pip install --no-cache-dir '.[live]'
+RUN pip install --no-cache-dir .
 USER 65532:65532
 EXPOSE 8000
 CMD ["uvicorn", "relationship_graph.api:app", "--host", "0.0.0.0", "--port", "8000"]

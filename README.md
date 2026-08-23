@@ -60,8 +60,8 @@ intentionally exclude message bodies, subjects, calendar titles, and description
 When `SURF_API_KEY` is set, project-X searches also add explicit Surf team-role edges.
 When `NEON_DATABASE_URL` (or the backward-compatible `DATABASE_URL`) is set, matching founder/team handles are enriched with IOSG follows
 from `deals.iosg_x_following`. Those snapshots are expected to be synchronized from Sorsa
-out of band; the request path does not download complete following lists. Install the live
-database extra with `pip install -e '.[dev,live]'`.
+out of band; the request path does not download complete following lists. PostgreSQL support
+is included in the standard installation; use `pip install -e '.[dev]'` for development tools.
 
 If `RELATIONSHIP_API_BASE_URL` and `RELATIONSHIP_API_KEY` are both configured,
 person-level relationship ownership from that service takes precedence over inferred
