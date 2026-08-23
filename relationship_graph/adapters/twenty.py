@@ -267,7 +267,10 @@ class TwentyGraphRepository:
         company_node = Node(
             id=f"twenty:company:{company['id']}", label=company.get("name") or query,
             kind="company", x_handle=_handle(company.get("xLink")),
-            metadata={"domain": (company.get("domainName") or {}).get("primaryLinkUrl"), "source": "twenty"},
+            metadata={
+                "domain": (company.get("domainName") or {}).get("primaryLinkUrl"),
+                "source": "twenty", "source_record_id": company["id"],
+            },
         )
         self._node(company_node)
         people = self._people(company["id"])

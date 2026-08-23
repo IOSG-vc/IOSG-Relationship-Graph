@@ -134,6 +134,50 @@ class NeonFollowProvider:
                 "last_confirmed": row[6].isoformat() if row[6] else None,
             } for row in cursor.fetchall()]
 
+    def store_company_people(self, company_id: str, company_name: str,
+                             company_x_handle: str | None,
+                             people: list[dict[str, Any]]) -> int:
+        """Persist provider-confirmed people without inferring departures from omissions."""
+        rows = []
+        for person in people:
+            handle = surf_x_handle(person)
+            if not handle:
+                continue
+            role = str(person.get("role") or "Team member").strip()
+            relationship, confidence = _role_relationship(role)
+            if re.search(r"\b(former|previous|ex[- ])\b", role, re.I):
+                relationship, confidence = "former_employee", 0.65
+            rows.append((
+                company_id, company_name, normalize_handle(company_x_handle or "") or None,
+                handle, person.get("name"), role, relationship.removesuffix("_of"),
+                "surf", "high" if confidence >= 0.85 else "medium",
+            ))
+        if not rows:
+            return 0
+        import psycopg2
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                insert into deals.x_company_people (
+                    company_notion_id, company_name, company_x_username,
+                    person_x_username, person_name, role, relationship_type,
+                    source, confidence, first_seen, last_confirmed, is_active
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now(), true)
+                on conflict (company_notion_id, person_x_username) do update set
+                    company_name = excluded.company_name,
+                    company_x_username = coalesce(excluded.company_x_username, deals.x_company_people.company_x_username),
+                    person_name = excluded.person_name,
+                    role = excluded.role,
+                    relationship_type = excluded.relationship_type,
+                    source = excluded.source,
+                    confidence = excluded.confidence,
+                    last_confirmed = now(),
+                    is_active = true
+                """,
+                rows,
+            )
+        return len(rows)
+
     def sync_status(self) -> dict[str, Any]:
         if not self.database_url:
             return {"status": "not_configured"}
@@ -243,11 +287,20 @@ class EnrichedGraphRepository:
                 self._source_diagnostics["neon"]["company_people"] = len(neon_people)
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["neon"] = {"status": "error", "error": type(exc).__name__}
-        if self.surf and target.x_handle and not neon_people:
+        surf_handle = target.x_handle or re.sub(r"[^a-z0-9_]", "", target.label.casefold())
+        if self.surf and surf_handle and not neon_people:
             try:
-                members = surf_members if surf_members is not None else self.surf.team(target.x_handle)
+                members = surf_members if surf_members is not None else self.surf.team(surf_handle)
                 self._add_surf_team(target, members)
-                self._source_diagnostics["surf"] = {"status": "ok", "team_members": len(members)}
+                stored = 0
+                if members and self.follows and hasattr(self.follows, "store_company_people"):
+                    company_id = str(target.metadata.get("source_record_id") or target.id)
+                    stored = self.follows.store_company_people(  # type: ignore[attr-defined]
+                        company_id, target.label, surf_handle, members,
+                    )
+                self._source_diagnostics["surf"] = {
+                    "status": "ok", "team_members": len(members), "stored_people": stored,
+                }
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["surf"] = {"status": "error", "error": type(exc).__name__}
         elif neon_people:

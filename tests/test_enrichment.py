@@ -47,6 +47,8 @@ class Follows:
 
 
 class Neon(Follows):
+    stored = []
+
     def find_companies(self, query, kind):
         if query.lower().lstrip("@") in {"ada", "acme"}:
             return [{"id": "notion-acme", "name": "Acme", "x_handle": "acme"}]
@@ -59,6 +61,10 @@ class Neon(Follows):
             "relationship_type": "founder", "source": "surf", "confidence": "high",
             "last_confirmed": "2026-08-20T00:00:00Z",
         }]
+
+    def store_company_people(self, company_id, company_name, company_x_handle, people):
+        self.stored.append((company_id, company_name, company_x_handle, people))
+        return len(people)
 
 
 def test_surf_and_neon_add_sourced_weak_follow_path():
@@ -97,3 +103,14 @@ def test_exact_neon_company_name_wins_over_fuzzy_base_match():
     assert result.resolved_target.label == "Acme"
     assert result.resolved_target.metadata["source"] == "neon"
     assert result.recommended.path == ["Jocy", "Ada", "Acme"]
+
+
+def test_company_name_discovers_stores_and_uses_surf_team():
+    neon = Neon()
+    neon.find_companies = lambda query, kind: []
+    repository = EnrichedGraphRepository(BaseRepository(), Surf(), neon)
+    result = IntroductionPathService(repository).search("Acme", QueryKind.COMPANY_NAME)
+    assert result.status == "ok"
+    assert result.recommended.path == ["Jocy", "Ada", "Acme"]
+    assert neon.stored[-1][1:3] == ("Acme", "acme")
+    assert result.diagnostics["sources"]["surf"]["stored_people"] == 1
