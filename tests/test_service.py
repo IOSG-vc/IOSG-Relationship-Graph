@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -61,3 +62,8 @@ def test_api_does_not_require_app_level_key(monkeypatch):
     monkeypatch.setenv("RELATIONSHIP_GRAPH_DATA", str(FIXTURE))
     response = TestClient(app).post("/v1/introduction-paths", json={"query": "Project"})
     assert response.status_code == 200
+
+
+def test_vercel_function_allows_live_search_duration():
+    config = json.loads((FIXTURE.parent.parent / "vercel.json").read_text())
+    assert config["functions"]["api/index.py"]["maxDuration"] >= 60
