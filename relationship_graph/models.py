@@ -50,11 +50,20 @@ class PathResult(BaseModel):
     suggested_next_action: str
 
 
+class OutreachContext(BaseModel):
+    id: str
+    title: str
+    why_now: str
+    signal_type: str
+    timestamp: int
+    sources: list[str] = Field(default_factory=list)
+
+
 class SearchResponse(BaseModel):
     status: str
     query: str
     resolved_target: Node | None = None
     recommended: PathResult | None = None
     alternatives: list[PathResult] = Field(default_factory=list)
+    outreach_context: list[OutreachContext] = Field(default_factory=list)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
-

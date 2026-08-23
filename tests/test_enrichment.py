@@ -1,4 +1,4 @@
-from relationship_graph.adapters.enrichment import EnrichedGraphRepository, funding_investors, select_surf_project
+from relationship_graph.adapters.enrichment import EnrichedGraphRepository, funding_investors, outreach_context, select_surf_project
 from relationship_graph.engine import IntroductionPathService
 from relationship_graph.models import Edge, Node, QueryKind
 
@@ -137,3 +137,21 @@ def test_surf_project_selection_prefers_exact_slug_after_rebrand():
         {"id": "right", "name": "EigenCloud", "slug": "eigenlayer"},
     ]
     assert select_surf_project(projects, "EigenLayer")["id"] == "right"
+
+
+def test_outreach_context_requires_a_source_and_accepts_live_signal_types():
+    items = [
+        {"id": "good", "title": "Fresh raise", "subtitle": "Mention the new round.",
+         "signal_type": "funding", "timestamp": 123, "sources": ["https://example.com/news"]},
+        {"id": "mindshare", "title": "Momentum", "subtitle": "Mention the recent attention.",
+         "signal_type": "bn_mindshare", "timestamp": 124,
+         "sources": ["https://x.com/example"]},
+        {"id": "unsourced", "title": "No source", "signal_type": "funding", "timestamp": 125},
+    ]
+    assert outreach_context(items) == [{
+        "id": "good", "title": "Fresh raise", "why_now": "Mention the new round.",
+        "signal_type": "funding", "timestamp": 123, "sources": ["https://example.com/news"],
+    }, {
+        "id": "mindshare", "title": "Momentum", "why_now": "Mention the recent attention.",
+        "signal_type": "bn_mindshare", "timestamp": 124, "sources": ["https://x.com/example"],
+    }]

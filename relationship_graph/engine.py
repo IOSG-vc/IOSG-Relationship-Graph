@@ -130,11 +130,13 @@ class IntroductionPathService:
         repository_diagnostics = getattr(self.repository, "diagnostics", None)
         if callable(repository_diagnostics):
             diagnostics.update(repository_diagnostics())
+        recent_context = (diagnostics.get("sources") or {}).get("recent_context") or []
         return SearchResponse(
             status="ok" if results else "no_path",
             query=query,
             resolved_target=target,
             recommended=results[0] if results else None,
             alternatives=results[1:],
+            outreach_context=recent_context,
             diagnostics=diagnostics,
         )

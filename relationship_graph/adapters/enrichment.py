@@ -62,6 +62,20 @@ class SurfClient:
             return {}
         return self._project_detail(project_ref, "funding").get("funding") or {}
 
+    def ai_news(self, project_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        if not self.api_key or not project_id:
+            return []
+        response = requests.get(
+            "https://api.asksurf.ai/gateway/v1/project/ai-news",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            params={"id": project_id, "limit": limit, "lang": "en"},
+            timeout=self.timeout,
+        )
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        return response.json().get("data") or []
+
     def enrich_fund_networks(self, investors: list[dict[str, Any]],
                              target_project_id: str | None,
                              limit: int = 4) -> list[dict[str, Any]]:
@@ -133,6 +147,25 @@ def funding_investors(funding: dict[str, Any], limit: int = 8) -> list[dict[str,
             if len(found) >= limit:
                 return list(found.values())
     return list(found.values())
+
+
+def outreach_context(items: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
+    """Keep sourced Surf context as talking points, never as relationship evidence."""
+    contexts = []
+    for item in items:
+        sources = [str(url) for url in item.get("sources") or [] if str(url).startswith(("https://", "http://"))]
+        if not sources:
+            continue
+        points = [str(point).strip() for point in item.get("tldr") or [] if str(point).strip()]
+        why_now = str(item.get("subtitle") or "").strip() or " ".join(points)
+        contexts.append({
+            "id": str(item.get("id") or ""), "title": str(item.get("title") or "Recent project update"),
+            "why_now": why_now, "signal_type": str(item.get("signal_type")),
+            "timestamp": int(item.get("timestamp") or 0), "sources": sources,
+        })
+        if len(contexts) >= limit:
+            break
+    return contexts
 
 
 def surf_x_handle(member: dict[str, Any]) -> str | None:
@@ -370,6 +403,54 @@ class NeonFollowProvider:
                 (company_id, company_name, project["id"], project.get("name"), project.get("slug")),
             )
 
+    def store_outreach_context(self, company_id: str, company_name: str,
+                               contexts: list[dict[str, Any]]) -> int:
+        if not contexts:
+            return 0
+        import psycopg2
+        from psycopg2.extras import Json
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                create table if not exists deals.x_company_outreach_context (
+                    company_id text not null,
+                    company_name text not null,
+                    source text not null,
+                    signal_id text not null,
+                    title text not null,
+                    why_now text,
+                    signal_type text not null,
+                    signal_timestamp bigint not null,
+                    source_urls jsonb not null,
+                    first_seen timestamptz not null default now(),
+                    last_confirmed timestamptz not null default now(),
+                    primary key (company_id, source, signal_id)
+                )
+                """
+            )
+            rows = [(
+                company_id, company_name, "surf_ai_news", item["id"], item["title"],
+                item["why_now"], item["signal_type"], item["timestamp"], Json(item["sources"]),
+            ) for item in contexts]
+            cursor.executemany(
+                """
+                insert into deals.x_company_outreach_context (
+                    company_id, company_name, source, signal_id, title, why_now,
+                    signal_type, signal_timestamp, source_urls
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (company_id, source, signal_id) do update set
+                    company_name = excluded.company_name,
+                    title = excluded.title,
+                    why_now = excluded.why_now,
+                    signal_type = excluded.signal_type,
+                    signal_timestamp = excluded.signal_timestamp,
+                    source_urls = excluded.source_urls,
+                    last_confirmed = now()
+                """,
+                rows,
+            )
+        return len(rows)
+
     def sync_status(self) -> dict[str, Any]:
         if not self.database_url:
             return {"status": "not_configured"}
@@ -505,6 +586,22 @@ class EnrichedGraphRepository:
                 }
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["surf_identity"] = {"status": "error", "error": type(exc).__name__}
+        if surf_project and self.surf and hasattr(self.surf, "ai_news"):
+            try:
+                contexts = outreach_context(self.surf.ai_news(surf_ref))  # type: ignore[attr-defined]
+                stored_contexts = 0
+                if contexts and self.follows and hasattr(self.follows, "store_outreach_context"):
+                    company_id = str(target.metadata.get("source_record_id") or target.id)
+                    stored_contexts = self.follows.store_outreach_context(  # type: ignore[attr-defined]
+                        company_id, target.label, contexts,
+                    )
+                self._source_diagnostics["ai_news"] = {
+                    "status": "ok" if contexts else "empty", "items": len(contexts),
+                    "stored_items": stored_contexts,
+                }
+                self._source_diagnostics["recent_context"] = contexts
+            except Exception as exc:  # noqa: BLE001
+                self._source_diagnostics["ai_news"] = {"status": "error", "error": type(exc).__name__}
         if self.surf and surf_ref and not neon_people:
             try:
                 members = surf_members if surf_members is not None else self.surf.team(surf_ref)
