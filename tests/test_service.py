@@ -56,3 +56,5 @@ def test_web_app_is_served():
     assert response.status_code == 200
     assert "IOSG Relationship Graph" in response.text
     assert "Find paths" in response.text
+    assert "API access settings" not in response.text
+    assert 'id="apiKey"' not in response.text

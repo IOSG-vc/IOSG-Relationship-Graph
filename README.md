@@ -35,8 +35,8 @@ cp .env.example .env
 uvicorn relationship_graph.api:app --reload
 ```
 
-Open `http://localhost:8000` for the web interface. The API key entered in the UI is kept
-in browser `sessionStorage` for the current tab only and is never embedded in frontend code.
+Open `http://localhost:8000` for the web interface. Integration credentials are configured
+server-side through environment variables and are never requested by the browser app.
 
 ```bash
 curl -s http://localhost:8000/v1/introduction-paths \
