@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from .engine import IntroductionPathService
@@ -44,12 +44,6 @@ def service() -> IntroductionPathService:
     return IntroductionPathService(JsonGraphRepository(data_path))
 
 
-def authorize(authorization: str | None = Header(default=None)) -> None:
-    expected = os.getenv("RELATIONSHIP_GRAPH_API_KEY")
-    if expected and authorization != f"Bearer {expected}":
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-
 app = FastAPI(title="IOSG Relationship Graph", version="0.1.0")
 
 
@@ -75,7 +69,7 @@ def ready() -> dict[str, str]:
     return {"status": "ready", "backend": backend}
 
 
-@app.get("/v1/diagnostics/sources", dependencies=[Depends(authorize)])
+@app.get("/v1/diagnostics/sources")
 def source_diagnostics() -> dict[str, object]:
     backend = os.getenv("RELATIONSHIP_GRAPH_BACKEND", "fixture").lower()
     database_url = os.getenv("NEON_DATABASE_URL") or os.getenv("DATABASE_URL", "")
@@ -97,7 +91,7 @@ def source_diagnostics() -> dict[str, object]:
     return {"status": "ok", "backend": backend, "sources": sources}
 
 
-@app.post("/v1/introduction-paths", response_model=SearchResponse, dependencies=[Depends(authorize)])
+@app.post("/v1/introduction-paths", response_model=SearchResponse)
 def introduction_paths(request: SearchRequest) -> SearchResponse:
     try:
         return service().search(request.query, request.kind, request.limit)

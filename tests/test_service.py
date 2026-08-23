@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -32,11 +31,7 @@ def test_all_supported_query_forms_resolve():
 def test_api_end_to_end(monkeypatch):
     monkeypatch.setenv("RELATIONSHIP_GRAPH_BACKEND", "fixture")
     monkeypatch.setenv("RELATIONSHIP_GRAPH_DATA", str(FIXTURE))
-    key = os.getenv("RELATIONSHIP_GRAPH_API_KEY")
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    response = TestClient(app).post(
-        "/v1/introduction-paths", json={"query": "Project"}, headers=headers
-    )
+    response = TestClient(app).post("/v1/introduction-paths", json={"query": "Project"})
     assert response.status_code == 200
     payload = response.json()
     assert payload["recommended"]["iosg_contact"] == "Darko"
@@ -58,3 +53,11 @@ def test_web_app_is_served():
     assert "Find paths" in response.text
     assert "API access settings" not in response.text
     assert 'id="apiKey"' not in response.text
+
+
+def test_api_does_not_require_app_level_key(monkeypatch):
+    monkeypatch.setenv("RELATIONSHIP_GRAPH_API_KEY", "legacy-deployment-key")
+    monkeypatch.setenv("RELATIONSHIP_GRAPH_BACKEND", "fixture")
+    monkeypatch.setenv("RELATIONSHIP_GRAPH_DATA", str(FIXTURE))
+    response = TestClient(app).post("/v1/introduction-paths", json={"query": "Project"})
+    assert response.status_code == 200

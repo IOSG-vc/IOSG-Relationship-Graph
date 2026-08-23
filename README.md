@@ -44,8 +44,6 @@ curl -s http://localhost:8000/v1/introduction-paths \
   -d '{"query":"project.xyz","limit":5}'
 ```
 
-Set `RELATIONSHIP_GRAPH_API_KEY` to require `Authorization: Bearer ...`.
-
 To query live Twenty data instead of the demo fixture, set:
 
 ```dotenv
@@ -82,8 +80,7 @@ Operational endpoints:
 
 - `GET /health` checks process health.
 - `GET /ready` checks that the selected backend has required local configuration.
-- `GET /v1/diagnostics/sources` reports source configuration and Neon/Sorsa freshness;
-  it requires the service bearer token when authentication is enabled.
+- `GET /v1/diagnostics/sources` reports source configuration and Neon/Sorsa freshness.
 
 ## Container
 
