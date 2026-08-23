@@ -4,8 +4,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from relationship_graph.api import app
-from relationship_graph.engine import IntroductionPathService
-from relationship_graph.models import QueryKind
+from relationship_graph.engine import IntroductionPathService, _diverse_results
+from relationship_graph.models import Edge, PathResult, QueryKind
 from relationship_graph.repository import JsonGraphRepository
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "demo_graph.json"
@@ -73,3 +73,21 @@ def test_neon_driver_is_a_runtime_dependency():
     project = (FIXTURE.parent.parent / "pyproject.toml").read_text()
     dependencies = project.split("[project.optional-dependencies]", 1)[0]
     assert "psycopg2-binary" in dependencies
+
+
+def test_visible_results_preserve_connection_type_diversity():
+    def path(rank, relationship, score):
+        return PathResult(
+            rank=rank, score=score, confidence="medium", path=["IOSG", "Contact", "Target"],
+            iosg_contact="IOSG", suggested_next_action="Validate", edges=[Edge(
+                id=f"edge-{rank}", source="iosg", target="target", relationship=relationship,
+                confidence=0.8, evidence="Test evidence", evidence_source="test",
+            )],
+        )
+
+    candidates = [path(i, "invested_in", 100 - i) for i in range(1, 6)]
+    candidates += [path(6, "x_follow", 40), path(7, "x_follow", 35)]
+    selected = _diverse_results(candidates, 5)
+    assert [edge.relationship for result in selected for edge in result.edges].count("invested_in") == 3
+    assert [edge.relationship for result in selected for edge in result.edges].count("x_follow") == 2
+    assert [result.rank for result in selected] == [1, 2, 3, 4, 5]

@@ -11,6 +11,42 @@ MAX_HOPS = 4
 FOLLOW_RELATIONSHIPS = {"x_follow"}
 
 
+def _path_family(result: PathResult) -> str:
+    relationships = {edge.relationship for edge in result.edges}
+    if "invested_in" in relationships:
+        return "investor"
+    if relationships & FOLLOW_RELATIONSHIPS:
+        return "x_follow"
+    if "referral" in relationships:
+        return "referral"
+    return "direct"
+
+
+def _diverse_results(results: list[PathResult], limit: int) -> list[PathResult]:
+    """Keep one evidence family from monopolizing the visible alternatives."""
+    if limit < 5:
+        selected = results[:limit]
+    else:
+        family_limit = 3
+        selected = []
+        family_counts: dict[str, int] = defaultdict(int)
+        deferred: list[PathResult] = []
+        for result in results:
+            family = _path_family(result)
+            if family_counts[family] >= family_limit:
+                deferred.append(result)
+                continue
+            selected.append(result)
+            family_counts[family] += 1
+            if len(selected) >= limit:
+                break
+        if len(selected) < limit:
+            selected.extend(deferred[:limit - len(selected)])
+    for rank, result in enumerate(selected, 1):
+        result.rank = rank
+    return selected
+
+
 def _confidence(score: int) -> str:
     return "high" if score >= 80 else "medium" if score >= 55 else "low"
 
@@ -77,8 +113,8 @@ class IntroductionPathService:
                 edges=path_edges,
                 suggested_next_action=_next_action(contact, path_edges),
             ))
-            if len(results) >= limit:
-                break
+        total_paths_found = len(results)
+        results = _diverse_results(results, limit)
 
         sources = sorted({edge.evidence_source for edge in edges})
         diagnostics = {
@@ -86,6 +122,7 @@ class IntroductionPathService:
             "nodes_considered": len(nodes),
             "edges_considered": len(edges),
             "paths_found": len(results),
+            "total_paths_found": total_paths_found,
             "sources_present": sources,
             "source_coverage": {source: sum(edge.evidence_source == source for edge in edges) for source in sources},
             "warnings": ["X follows are weak signals and do not establish willingness to introduce."],
