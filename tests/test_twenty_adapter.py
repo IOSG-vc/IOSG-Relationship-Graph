@@ -97,10 +97,14 @@ def test_investor_enrichment_adds_evidence_backed_fund_path():
     target = repository.resolve("Acme", QueryKind.COMPANY_NAME)[0]
     repository.add_investor_paths(target, [{
         "id": "surf-fund-1", "name": "Fund One", "round_name": "Seed",
-        "round_date": "2025-01-01", "is_lead": True,
+        "round_date": "2025-01-01", "is_lead": True, "portfolio_verified": True,
+        "fund_profile": {"name": "Fund One", "x_accounts": [{"handle": "fundone"}],
+                         "members": [{"name": "Ivy Investor"}]},
     }])
     relationships = {edge.relationship for edge in repository.edges()}
     assert {"invested_in", "works_at", "direct_relationship"} <= relationships
     investment = next(edge for edge in repository.edges() if edge.relationship == "invested_in")
     assert investment.evidence_source == "surf"
-    assert "lead investor" in investment.evidence
+    assert "fund portfolio both list" in investment.evidence
+    fund = next(node for node in repository.nodes() if node.kind == "fund")
+    assert fund.x_handle == "fundone"

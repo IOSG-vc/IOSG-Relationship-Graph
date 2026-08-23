@@ -74,6 +74,12 @@ python scripts/inspect_surf.py eigenlayer --field funding
 
 The script reads `SURF_API_KEY` from `.env` and never prints the credential.
 
+To inspect a fund's raw Surf identity, team, and portfolio responses, run:
+
+```bash
+python scripts/inspect_surf_fund.py "Polychain Capital"
+```
+
 If `RELATIONSHIP_API_BASE_URL` and `RELATIONSHIP_API_KEY` are both configured,
 person-level relationship ownership from that service takes precedence over inferred
 Twenty interaction ownership. A missing record or transient owner-service failure falls

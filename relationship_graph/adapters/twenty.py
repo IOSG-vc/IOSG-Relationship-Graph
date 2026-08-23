@@ -267,14 +267,23 @@ class TwentyGraphRepository:
             if not exact:
                 continue
             investor_id = f"twenty:company:{exact['id']}"
-            investor_node = Node(id=investor_id, label=exact.get("name") or name, kind="company")
+            profile = investor.get("fund_profile") or {}
+            x_accounts = profile.get("x_accounts") or []
+            fund_handle = normalize_handle(str((x_accounts[0] if x_accounts else {}).get("handle") or "")) or None
+            investor_node = Node(
+                id=investor_id, label=profile.get("name") or exact.get("name") or name,
+                kind="fund", x_handle=fund_handle,
+                metadata={"source": "surf_twenty", "surf_fund_id": investor.get("id")},
+            )
             self._node(investor_node)
             round_name = str(investor.get("round_name") or "funding round")
             self._edge(Edge(
                 id=f"surf:investment:{investor.get('id') or name}:{target.id}",
                 source=investor_id, target=target.id, relationship="invested_in",
-                confidence=0.98 if investor.get("is_lead") else 0.94,
-                evidence=(f"Surf lists {investor_node.label} as "
+                confidence=(0.99 if investor.get("portfolio_verified") else
+                            0.98 if investor.get("is_lead") else 0.94),
+                evidence=(f"Surf {'project funding and fund portfolio both list' if investor.get('portfolio_verified') else 'lists'} "
+                          f"{investor_node.label} as "
                           f"{'a lead investor' if investor.get('is_lead') else 'an investor'} "
                           f"in {target.label}'s {round_name}."),
                 evidence_source="surf", observed_at=investor.get("round_date") or now,
@@ -284,6 +293,10 @@ class TwentyGraphRepository:
                 if person.get("introDistance") == 0 or person.get("introducedById")
                 or person.get("relationshipStrength") in {"HOT", "WARM"}
             ][:3]
+            profile_members = {
+                _name(item.get("name")) if isinstance(item.get("name"), dict) else str(item.get("name") or "")
+                for item in profile.get("members") or []
+            }
             introducer_ids = [person.get("introducedById") for person in warm_people if person.get("introducedById")]
             introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
             for person in warm_people:
@@ -295,8 +308,10 @@ class TwentyGraphRepository:
                 self._edge(Edge(
                     id=f"twenty:investor-team:{person['id']}:{exact['id']}",
                     source=person_node.id, target=investor_id, relationship="works_at",
-                    confidence=0.85,
-                    evidence=f"Twenty lists {person_node.label} as a warm contact at {investor_node.label}.",
+                    confidence=0.90 if person_node.label in profile_members else 0.85,
+                    evidence=(f"Twenty lists {person_node.label} as a warm contact at {investor_node.label}."
+                              + (" Surf's fund profile also lists this team member."
+                                 if person_node.label in profile_members else "")),
                     evidence_source="twenty", observed_at=now,
                 ))
                 introducer = introducers.get(person.get("introducedById"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -60,6 +61,45 @@ class SurfClient:
         if not self.api_key or not project_ref:
             return {}
         return self._project_detail(project_ref, "funding").get("funding") or {}
+
+    def enrich_fund_networks(self, investors: list[dict[str, Any]],
+                             target_project_id: str | None,
+                             limit: int = 4) -> list[dict[str, Any]]:
+        """Fetch fund profiles and date-bounded portfolio confirmation concurrently."""
+        selected = investors[:limit]
+
+        def enrich(investor: dict[str, Any]) -> dict[str, Any]:
+            fund_id = str(investor.get("id") or "")
+            if not fund_id:
+                return investor
+            try:
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                detail_response = requests.get(
+                    "https://api.asksurf.ai/gateway/v1/fund/detail",
+                    headers=headers, params={"id": fund_id}, timeout=self.timeout,
+                )
+                detail_response.raise_for_status()
+                profile = detail_response.json().get("data") or {}
+                portfolio_params: dict[str, Any] = {"id": fund_id, "limit": 100}
+                round_date = investor.get("round_date")
+                if round_date:
+                    start = int(datetime.fromisoformat(str(round_date)).replace(tzinfo=timezone.utc).timestamp())
+                    portfolio_params.update({"invested_after": start, "invested_before": start + 86_399})
+                portfolio_response = requests.get(
+                    "https://api.asksurf.ai/gateway/v1/fund/portfolio",
+                    headers=headers, params=portfolio_params, timeout=self.timeout,
+                )
+                portfolio_response.raise_for_status()
+                portfolio = portfolio_response.json().get("data") or []
+                match = next((item for item in portfolio if item.get("project_id") == target_project_id), None)
+                return {**investor, "fund_profile": profile, "portfolio_match": match,
+                        "portfolio_verified": bool(match)}
+            except (requests.RequestException, ValueError) as exc:
+                return {**investor, "fund_network_error": type(exc).__name__}
+
+        with ThreadPoolExecutor(max_workers=min(4, len(selected) or 1)) as executor:
+            enriched = list(executor.map(enrich, selected))
+        return enriched + investors[len(selected):]
 
 
 def select_surf_project(projects: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
@@ -238,6 +278,7 @@ class NeonFollowProvider:
         if not investors:
             return 0
         import psycopg2
+        from psycopg2.extras import Json
         with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -259,19 +300,24 @@ class NeonFollowProvider:
                 )
                 """
             )
+            cursor.execute("alter table deals.x_company_investors add column if not exists portfolio_verified boolean not null default false")
+            cursor.execute("alter table deals.x_company_investors add column if not exists fund_profile jsonb")
+            cursor.execute("alter table deals.x_company_investors add column if not exists portfolio_evidence jsonb")
             rows = [(
                 company_id, company_name, normalize_handle(company_x_handle or "") or None,
                 str(item.get("id") or item.get("name")), item.get("name"), item.get("type"),
                 item.get("round_name") or "", item.get("round_date"), item.get("round_amount"),
-                bool(item.get("is_lead")), "surf",
+                bool(item.get("is_lead")), "surf", bool(item.get("portfolio_verified")),
+                Json(item.get("fund_profile")) if item.get("fund_profile") else None,
+                Json(item.get("portfolio_match")) if item.get("portfolio_match") else None,
             ) for item in investors if item.get("name")]
             cursor.executemany(
                 """
                 insert into deals.x_company_investors (
                     company_id, company_name, company_x_username, investor_source_id,
                     investor_name, investor_type, round_name, round_date, round_amount,
-                    is_lead, source
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    is_lead, source, portfolio_verified, fund_profile, portfolio_evidence
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (company_id, investor_source_id, round_name) do update set
                     company_name = excluded.company_name,
                     company_x_username = coalesce(excluded.company_x_username, deals.x_company_investors.company_x_username),
@@ -281,6 +327,9 @@ class NeonFollowProvider:
                     round_amount = excluded.round_amount,
                     is_lead = excluded.is_lead,
                     source = excluded.source,
+                    portfolio_verified = excluded.portfolio_verified,
+                    fund_profile = coalesce(excluded.fund_profile, deals.x_company_investors.fund_profile),
+                    portfolio_evidence = coalesce(excluded.portfolio_evidence, deals.x_company_investors.portfolio_evidence),
                     last_confirmed = now()
                 """,
                 rows,
@@ -476,6 +525,10 @@ class EnrichedGraphRepository:
         if self.surf and surf_ref and hasattr(self.surf, "funding"):
             try:
                 investors = funding_investors(self.surf.funding(surf_ref))  # type: ignore[attr-defined]
+                if investors and surf_project and hasattr(self.surf, "enrich_fund_networks"):
+                    investors = self.surf.enrich_fund_networks(  # type: ignore[attr-defined]
+                        investors, str(surf_project.get("id") or "") or None,
+                    )
                 stored_investors = 0
                 company_id = str(target.metadata.get("source_record_id") or target.id)
                 if investors and self.follows and hasattr(self.follows, "store_company_investors"):
@@ -489,11 +542,16 @@ class EnrichedGraphRepository:
                 self._source_diagnostics["investors"] = {
                     "status": "ok", "investors_found": len(investors),
                     "stored_investors": stored_investors,
+                    "fund_profiles": sum(bool(item.get("fund_profile")) for item in investors),
+                    "portfolio_verified": sum(bool(item.get("portfolio_verified")) for item in investors),
                 }
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["investors"] = {"status": "error", "error": type(exc).__name__}
         if self.follows:
-            people = [node for node in self._nodes.values() if node.kind == "person" and node.x_handle]
+            people = [
+                node for node in self._nodes.values()
+                if node.kind in {"person", "fund"} and node.x_handle
+            ]
             try:
                 follower_map = self.follows.followers([node.x_handle for node in people if node.x_handle])
                 self._add_follows(people, follower_map)
