@@ -24,6 +24,10 @@ class EmptyBase(BaseRepository):
         return []
 
 
+class FuzzyWrongBase(BaseRepository):
+    target = Node(id="company:not-acme", label="Acme Holdings Europe", kind="company")
+
+
 class Surf:
     def team(self, project_handle):
         assert project_handle == "acme"
@@ -84,3 +88,12 @@ def test_neon_can_resolve_founder_handle_and_reuse_cached_association():
     assert result.resolved_target.label == "Acme"
     assert result.recommended.path == ["Jocy", "Ada", "Acme"]
     assert result.recommended.edges[1].evidence_source == "surf_neon"
+
+
+def test_exact_neon_company_name_wins_over_fuzzy_base_match():
+    repository = EnrichedGraphRepository(FuzzyWrongBase(), surf=None, follows=Neon())
+    result = IntroductionPathService(repository).search("Acme", QueryKind.COMPANY_NAME)
+    assert result.status == "ok"
+    assert result.resolved_target.label == "Acme"
+    assert result.resolved_target.metadata["source"] == "neon"
+    assert result.recommended.path == ["Jocy", "Ada", "Acme"]

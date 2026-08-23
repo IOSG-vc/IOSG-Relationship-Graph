@@ -191,9 +191,10 @@ class EnrichedGraphRepository:
                 preloaded_neon = self.follows.find_companies(query, kind)  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["neon"] = {"status": "error", "error": type(exc).__name__}
-        # Exact cached X associations avoid several slow remote fallback queries.
+        # Exact cached associations avoid fuzzy remote matches and several slow fallback queries.
         use_neon_resolution = bool(
-            preloaded_neon and actual_kind in {QueryKind.PROJECT_X, QueryKind.FOUNDER_X}
+            preloaded_neon
+            and actual_kind in {QueryKind.COMPANY_NAME, QueryKind.PROJECT_X, QueryKind.FOUNDER_X}
         )
         matches = [] if use_neon_resolution else self.base.resolve(query, kind)
         self._nodes = {} if use_neon_resolution else {node.id: node for node in self.base.nodes()}

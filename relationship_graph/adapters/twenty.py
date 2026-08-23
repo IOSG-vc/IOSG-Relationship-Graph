@@ -115,7 +115,20 @@ class TwentyGraphRepository:
           } } }
         }
         """
-        return self._items(self.graphql(company_query, {"filter": clauses[0]})["companies"])
+        companies = self._items(self.graphql(company_query, {"filter": clauses[0]})["companies"])
+        if actual == QueryKind.COMPANY_NAME:
+            needle = query.strip().casefold()
+            companies.sort(key=lambda company: (str(company.get("name") or "").casefold() != needle))
+        elif actual == QueryKind.DOMAIN:
+            needle = query.lower().removeprefix("https://").removeprefix("http://").strip("/")
+            companies.sort(key=lambda company: (
+                str((company.get("domainName") or {}).get("primaryLinkUrl") or "")
+                .lower().removeprefix("https://").removeprefix("http://").strip("/") != needle
+            ))
+        elif actual == QueryKind.PROJECT_X:
+            needle = normalize_handle(query)
+            companies.sort(key=lambda company: (_handle(company.get("xLink")) != needle))
+        return companies
 
     def _people(self, company_id: str) -> list[dict[str, Any]]:
         query = """
