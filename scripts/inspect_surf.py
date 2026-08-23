@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Show raw Surf project-detail responses used by the relationship graph.",
     )
-    parser.add_argument("handle", help="Project X handle, with or without @ (for example: eigenlayer)")
+    parser.add_argument("query", help="Project name or X handle (for example: EigenLayer)")
     parser.add_argument(
         "--field", choices=(*USED_FIELDS, "all"), default="all",
         help="Surf field to request (default: all fields used by this app)",
@@ -69,10 +69,18 @@ def main() -> int:
         return 2
     fields = USED_FIELDS if args.field == "all" else (args.field,)
     try:
-        project_ref = args.handle.lstrip("@")
+        project_ref = args.query.lstrip("@")
+        search_payload: dict[str, Any] | None = None
+        if args.field != "search":
+            search_payload = search_project(api_key, args.query, args.timeout)
+            results = search_payload.get("data") or []
+            if not results:
+                print(f"Surf project search found no match for {args.query!r}.", file=sys.stderr)
+                return 1
+            project_ref = str(results[0]["id"])
         for field in fields:
             if field == "search":
-                payload = search_project(api_key, args.handle, args.timeout)
+                payload = search_payload or search_project(api_key, args.query, args.timeout)
                 results = payload.get("data") or []
                 if results:
                     project_ref = str(results[0]["id"])
