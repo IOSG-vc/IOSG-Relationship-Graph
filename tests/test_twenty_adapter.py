@@ -57,6 +57,23 @@ class ReferralTwenty(FakeTwenty):
         }]
 
 
+class InvestorTwenty(FakeTwenty):
+    def _find_target(self, query, kind):
+        if query == "Fund One":
+            return [{"id": "fund-1", "name": "Fund One"}]
+        return super()._find_target(query, kind)
+
+    def _people(self, company_id):
+        if company_id == "fund-1":
+            return [{
+                "id": "investor-1", "name": {"firstName": "Ivy", "lastName": "Investor"},
+                "jobTitle": "Partner", "companyId": "fund-1", "isIosgTeam": False,
+                "relationshipStrength": "WARM", "introducedById": None, "introDistance": 0,
+                "xLink": {"primaryLinkUrl": "https://x.com/ivy"},
+            }]
+        return super()._people(company_id)
+
+
 def test_twenty_builds_privacy_safe_ranked_path():
     result = IntroductionPathService(FakeTwenty()).search("Acme", QueryKind.COMPANY_NAME)
     assert result.status == "ok"
@@ -73,3 +90,17 @@ def test_existing_referral_ranks_above_interaction_metadata():
     assert result.recommended.path == ["Mario", "Ada Founder", "Acme"]
     assert result.recommended.edges[0].relationship == "referral"
     assert result.recommended.confidence == "high"
+
+
+def test_investor_enrichment_adds_evidence_backed_fund_path():
+    repository = InvestorTwenty()
+    target = repository.resolve("Acme", QueryKind.COMPANY_NAME)[0]
+    repository.add_investor_paths(target, [{
+        "id": "surf-fund-1", "name": "Fund One", "round_name": "Seed",
+        "round_date": "2025-01-01", "is_lead": True,
+    }])
+    relationships = {edge.relationship for edge in repository.edges()}
+    assert {"invested_in", "works_at", "direct_relationship"} <= relationships
+    investment = next(edge for edge in repository.edges() if edge.relationship == "invested_in")
+    assert investment.evidence_source == "surf"
+    assert "lead investor" in investment.evidence

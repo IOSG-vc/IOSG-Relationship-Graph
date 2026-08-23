@@ -255,6 +255,74 @@ class TwentyGraphRepository:
         """
         return self._items(self.graphql(query, {"ids": person_ids})["companies"])
 
+    def add_investor_paths(self, target: Node, investors: list[dict[str, Any]]) -> None:
+        """Attach bounded, evidence-backed paths through investor firms known in Twenty."""
+        now = datetime.now(timezone.utc).isoformat()
+        for investor in investors[:8]:
+            name = str(investor.get("name") or "").strip()
+            if not name:
+                continue
+            matches = self._find_target(name, QueryKind.COMPANY_NAME)
+            exact = next((item for item in matches if str(item.get("name") or "").casefold() == name.casefold()), None)
+            if not exact:
+                continue
+            investor_id = f"twenty:company:{exact['id']}"
+            investor_node = Node(id=investor_id, label=exact.get("name") or name, kind="company")
+            self._node(investor_node)
+            round_name = str(investor.get("round_name") or "funding round")
+            self._edge(Edge(
+                id=f"surf:investment:{investor.get('id') or name}:{target.id}",
+                source=investor_id, target=target.id, relationship="invested_in",
+                confidence=0.98 if investor.get("is_lead") else 0.94,
+                evidence=(f"Surf lists {investor_node.label} as "
+                          f"{'a lead investor' if investor.get('is_lead') else 'an investor'} "
+                          f"in {target.label}'s {round_name}."),
+                evidence_source="surf", observed_at=investor.get("round_date") or now,
+            ))
+            warm_people = [
+                person for person in self._people(exact["id"])
+                if person.get("introDistance") == 0 or person.get("introducedById")
+                or person.get("relationshipStrength") in {"HOT", "WARM"}
+            ][:3]
+            introducer_ids = [person.get("introducedById") for person in warm_people if person.get("introducedById")]
+            introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
+            for person in warm_people:
+                person_node = Node(
+                    id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Known contact",
+                    kind="person", x_handle=_handle(person.get("xLink")),
+                )
+                self._node(person_node)
+                self._edge(Edge(
+                    id=f"twenty:investor-team:{person['id']}:{exact['id']}",
+                    source=person_node.id, target=investor_id, relationship="works_at",
+                    confidence=0.85,
+                    evidence=f"Twenty lists {person_node.label} as a warm contact at {investor_node.label}.",
+                    evidence_source="twenty", observed_at=now,
+                ))
+                introducer = introducers.get(person.get("introducedById"))
+                if introducer:
+                    connector = Node(
+                        id=f"twenty:person:{introducer['id']}", label=_name(introducer.get("name")) or "IOSG",
+                        kind="iosg_member" if introducer.get("isIosgTeam") else "person",
+                    )
+                    self._node(connector)
+                    self._edge(Edge(
+                        id=f"twenty:investor-introducer:{introducer['id']}:{person['id']}",
+                        source=connector.id, target=person_node.id, relationship="existing_introducer",
+                        confidence=0.94,
+                        evidence=f"Twenty records {connector.label} as introducer for {person_node.label}.",
+                        evidence_source="twenty", observed_at=now,
+                    ))
+                elif person.get("introDistance") == 0:
+                    iosg = Node(id="iosg:unresolved", label="IOSG", kind="iosg_member")
+                    self._node(iosg)
+                    self._edge(Edge(
+                        id=f"twenty:investor-direct:{person['id']}", source=iosg.id,
+                        target=person_node.id, relationship="direct_relationship", confidence=0.80,
+                        evidence="Twenty marks this investor contact with introduction distance 0.",
+                        evidence_source="twenty", observed_at=now,
+                    ))
+
     def resolve(self, query: str, kind: QueryKind) -> list[Node]:
         self._nodes.clear()
         self._edges.clear()

@@ -40,6 +40,40 @@ class SurfClient:
         response.raise_for_status()
         return ((response.json().get("data") or {}).get("team") or {}).get("members") or []
 
+    def funding(self, project_handle: str) -> dict[str, Any]:
+        if not self.api_key or not project_handle:
+            return {}
+        response = requests.get(
+            "https://api.asksurf.ai/gateway/v1/project/detail",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            params={"handle": normalize_handle(project_handle), "fields": "funding"},
+            timeout=self.timeout,
+        )
+        if response.status_code == 404:
+            return {}
+        response.raise_for_status()
+        return (response.json().get("data") or {}).get("funding") or {}
+
+
+def funding_investors(funding: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    """Flatten explicit funding evidence, preferring leads and recent rounds."""
+    found: dict[str, dict[str, Any]] = {}
+    rounds = sorted(funding.get("rounds") or [], key=lambda item: item.get("date") or "", reverse=True)
+    for round_item in rounds:
+        for investor in sorted(round_item.get("investors") or [], key=lambda item: not item.get("is_lead")):
+            key = str(investor.get("id") or investor.get("name") or "").casefold()
+            if not key or key in found:
+                continue
+            found[key] = {
+                **investor,
+                "round_name": round_item.get("round_name"),
+                "round_date": round_item.get("date"),
+                "round_amount": round_item.get("amount"),
+            }
+            if len(found) >= limit:
+                return list(found.values())
+    return list(found.values())
+
 
 def surf_x_handle(member: dict[str, Any]) -> str | None:
     links = member.get("social_links") or {}
@@ -178,6 +212,61 @@ class NeonFollowProvider:
             )
         return len(rows)
 
+    def store_company_investors(self, company_id: str, company_name: str,
+                                company_x_handle: str | None,
+                                investors: list[dict[str, Any]]) -> int:
+        if not investors:
+            return 0
+        import psycopg2
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                create table if not exists deals.x_company_investors (
+                    company_id text not null,
+                    company_name text not null,
+                    company_x_username text,
+                    investor_source_id text not null,
+                    investor_name text not null,
+                    investor_type text,
+                    round_name text not null default '',
+                    round_date date,
+                    round_amount numeric,
+                    is_lead boolean not null default false,
+                    source text not null,
+                    first_seen timestamptz not null default now(),
+                    last_confirmed timestamptz not null default now(),
+                    primary key (company_id, investor_source_id, round_name)
+                )
+                """
+            )
+            rows = [(
+                company_id, company_name, normalize_handle(company_x_handle or "") or None,
+                str(item.get("id") or item.get("name")), item.get("name"), item.get("type"),
+                item.get("round_name") or "", item.get("round_date"), item.get("round_amount"),
+                bool(item.get("is_lead")), "surf",
+            ) for item in investors if item.get("name")]
+            cursor.executemany(
+                """
+                insert into deals.x_company_investors (
+                    company_id, company_name, company_x_username, investor_source_id,
+                    investor_name, investor_type, round_name, round_date, round_amount,
+                    is_lead, source
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (company_id, investor_source_id, round_name) do update set
+                    company_name = excluded.company_name,
+                    company_x_username = coalesce(excluded.company_x_username, deals.x_company_investors.company_x_username),
+                    investor_name = excluded.investor_name,
+                    investor_type = excluded.investor_type,
+                    round_date = excluded.round_date,
+                    round_amount = excluded.round_amount,
+                    is_lead = excluded.is_lead,
+                    source = excluded.source,
+                    last_confirmed = now()
+                """,
+                rows,
+            )
+        return len(rows)
+
     def sync_status(self) -> dict[str, Any]:
         if not self.database_url:
             return {"status": "not_configured"}
@@ -305,6 +394,25 @@ class EnrichedGraphRepository:
                 self._source_diagnostics["surf"] = {"status": "error", "error": type(exc).__name__}
         elif neon_people:
             self._source_diagnostics["surf"] = {"status": "cached_in_neon", "team_members": len(neon_people)}
+        if self.surf and surf_handle and hasattr(self.surf, "funding"):
+            try:
+                investors = funding_investors(self.surf.funding(surf_handle))  # type: ignore[attr-defined]
+                stored_investors = 0
+                company_id = str(target.metadata.get("source_record_id") or target.id)
+                if investors and self.follows and hasattr(self.follows, "store_company_investors"):
+                    stored_investors = self.follows.store_company_investors(  # type: ignore[attr-defined]
+                        company_id, target.label, surf_handle, investors,
+                    )
+                if investors and hasattr(self.base, "add_investor_paths"):
+                    self.base.add_investor_paths(target, investors)  # type: ignore[attr-defined]
+                    self._nodes.update({node.id: node for node in self.base.nodes()})
+                    self._edges.update({edge.id: edge for edge in self.base.edges()})
+                self._source_diagnostics["investors"] = {
+                    "status": "ok", "investors_found": len(investors),
+                    "stored_investors": stored_investors,
+                }
+            except Exception as exc:  # noqa: BLE001
+                self._source_diagnostics["investors"] = {"status": "error", "error": type(exc).__name__}
         if self.follows:
             people = [node for node in self._nodes.values() if node.kind == "person" and node.x_handle]
             try:

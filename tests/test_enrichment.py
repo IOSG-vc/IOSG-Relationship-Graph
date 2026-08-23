@@ -1,4 +1,4 @@
-from relationship_graph.adapters.enrichment import EnrichedGraphRepository
+from relationship_graph.adapters.enrichment import EnrichedGraphRepository, funding_investors
 from relationship_graph.engine import IntroductionPathService
 from relationship_graph.models import Edge, Node, QueryKind
 
@@ -114,3 +114,18 @@ def test_company_name_discovers_stores_and_uses_surf_team():
     assert result.recommended.path == ["Jocy", "Ada", "Acme"]
     assert neon.stored[-1][1:3] == ("Acme", "acme")
     assert result.diagnostics["sources"]["surf"]["stored_people"] == 1
+
+
+def test_funding_investors_prefers_leads_and_deduplicates_funds():
+    funding = {"rounds": [
+        {"round_name": "Seed", "date": "2024-01-01", "investors": [
+            {"id": "fund-1", "name": "Fund One", "is_lead": False},
+        ]},
+        {"round_name": "Series A", "date": "2025-01-01", "investors": [
+            {"id": "fund-2", "name": "Fund Two", "is_lead": False},
+            {"id": "fund-1", "name": "Fund One", "is_lead": True},
+        ]},
+    ]}
+    investors = funding_investors(funding)
+    assert [item["name"] for item in investors] == ["Fund One", "Fund Two"]
+    assert investors[0]["round_name"] == "Series A"
