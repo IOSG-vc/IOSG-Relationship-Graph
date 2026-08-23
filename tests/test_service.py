@@ -65,6 +65,17 @@ def test_api_does_not_require_app_level_key(monkeypatch):
     assert response.status_code == 200
 
 
+def test_password_login_protects_app_and_api(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "correct horse battery staple")
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
+    client = TestClient(app)
+    assert client.get("/", follow_redirects=False).status_code == 303
+    assert client.post("/v1/introduction-paths", json={"query": "Project"}).status_code == 401
+    assert client.post("/login", json={"password": "wrong"}).status_code == 401
+    assert client.post("/login", json={"password": "correct horse battery staple"}).status_code == 200
+    assert client.get("/").status_code == 200
+
+
 def test_vercel_function_allows_live_search_duration():
     config = json.loads((FIXTURE.parent.parent / "vercel.json").read_text())
     assert config["functions"]["api/index.py"]["maxDuration"] >= 60

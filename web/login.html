@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in · IOSG Relationship Graph</title>
+  <style>
+    :root{--bg:#07110e;--panel:#0d1c17;--line:#203b31;--text:#eef8f2;--muted:#8ca99d;--lime:#b9ff66;--red:#ff7b72}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif;background:radial-gradient(circle at 20% 0,#163a2c 0,transparent 35rem),var(--bg)}main{width:min(420px,calc(100% - 32px));padding:32px;border:1px solid var(--line);border-radius:20px;background:#0c1a16ee;box-shadow:0 25px 80px #0008}.brand{color:var(--lime);font-size:12px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}h1{margin:14px 0 5px;font-size:30px;letter-spacing:-.04em}p{margin:0 0 24px;color:var(--muted)}input,button{width:100%;height:52px;border-radius:11px;font:inherit}input{padding:0 15px;color:var(--text);background:#07120e;border:1px solid var(--line);outline:0}input:focus{border-color:#b9ff6688}button{margin-top:11px;border:0;background:var(--lime);color:#10200f;font-weight:800;cursor:pointer}button:disabled{opacity:.55}.error{min-height:22px;margin:13px 2px 0;color:var(--red)}
+  </style>
+</head>
+<body><main><div class="brand">IOSG Relationship Graph</div><h1>Private access</h1><p>Enter the team password to continue.</p><form id="login"><input id="password" type="password" required autofocus autocomplete="current-password" placeholder="Password"><button id="submit">Sign in →</button></form><div id="message" class="error"></div></main><script>
+const form=document.getElementById('login'),button=document.getElementById('submit'),message=document.getElementById('message');form.addEventListener('submit',async event=>{event.preventDefault();button.disabled=true;message.textContent='';try{const response=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('password').value})});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Unable to sign in');location.href='/'}catch(error){message.textContent=error.message;button.disabled=false}});
+</script></body></html>

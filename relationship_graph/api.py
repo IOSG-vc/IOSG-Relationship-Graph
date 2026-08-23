@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import os
+import base64
+import hashlib
+import hmac
+import json
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 
 from .engine import IntroductionPathService
 from .models import SearchRequest, SearchResponse
@@ -45,6 +51,72 @@ def service() -> IntroductionPathService:
 
 
 app = FastAPI(title="IOSG Relationship Graph", version="0.1.0")
+SESSION_COOKIE = "iosg_session"
+SESSION_TTL = 60 * 60 * 12
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+def _session_secret() -> str:
+    return os.getenv("SESSION_SECRET") or os.getenv("APP_PASSWORD", "")
+
+
+def _session_token() -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + SESSION_TTL}).encode()).decode()
+    signature = hmac.new(_session_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _valid_session(token: str | None) -> bool:
+    if not token or "." not in token or not _session_secret():
+        return False
+    payload, signature = token.rsplit(".", 1)
+    expected = hmac.new(_session_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return False
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode()))
+        return int(data["exp"]) > int(time.time())
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return False
+
+
+@app.middleware("http")
+async def password_gate(request: Request, call_next):
+    password = os.getenv("APP_PASSWORD", "")
+    public_paths = {"/health", "/ready", "/login"}
+    if not password or request.url.path in public_paths or _valid_session(request.cookies.get(SESSION_COOKIE)):
+        return await call_next(request)
+    if request.url.path == "/" and request.method == "GET":
+        return RedirectResponse("/login", status_code=303)
+    return JSONResponse({"detail": "Authentication required"}, status_code=401)
+
+
+@app.get("/login", include_in_schema=False)
+def login_page() -> FileResponse:
+    return FileResponse(ROOT / "web" / "login.html")
+
+
+@app.post("/login", include_in_schema=False)
+def login(credentials: LoginRequest) -> JSONResponse:
+    expected = os.getenv("APP_PASSWORD", "")
+    if not expected or not hmac.compare_digest(credentials.password, expected):
+        return JSONResponse({"detail": "Incorrect password"}, status_code=401)
+    response = JSONResponse({"status": "ok"})
+    response.set_cookie(
+        SESSION_COOKIE, _session_token(), max_age=SESSION_TTL, httponly=True,
+        secure=bool(os.getenv("VERCEL")), samesite="strict", path="/",
+    )
+    return response
+
+
+@app.post("/logout", include_in_schema=False)
+def logout() -> JSONResponse:
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 @app.get("/", include_in_schema=False)
