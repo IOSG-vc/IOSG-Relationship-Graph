@@ -63,6 +63,16 @@ from `deals.iosg_x_following`. Those snapshots are expected to be synchronized f
 out of band; the request path does not download complete following lists. PostgreSQL support
 is included in the standard installation; use `pip install -e '.[dev]'` for development tools.
 
+To inspect the raw Surf responses used by the app (`team` and `funding`), run:
+
+```bash
+python scripts/inspect_surf.py eigenlayer
+python scripts/inspect_surf.py @eigenlayer --field team
+python scripts/inspect_surf.py eigenlayer --field funding
+```
+
+The script reads `SURF_API_KEY` from `.env` and never prints the credential.
+
 If `RELATIONSHIP_API_BASE_URL` and `RELATIONSHIP_API_KEY` are both configured,
 person-level relationship ownership from that service takes precedence over inferred
 Twenty interaction ownership. A missing record or transient owner-service failure falls
