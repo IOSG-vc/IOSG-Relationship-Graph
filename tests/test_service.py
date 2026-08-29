@@ -55,6 +55,8 @@ def test_web_app_is_served():
     assert "API access settings" not in response.text
     assert 'id="apiKey"' not in response.text
     assert "Why now · what to mention" in response.text
+    assert "Introduction path via" in response.text
+    assert "should lead" not in response.text
 
 
 def test_api_does_not_require_app_level_key(monkeypatch):
