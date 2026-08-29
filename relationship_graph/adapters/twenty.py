@@ -51,6 +51,17 @@ def _creator_name(person: dict[str, Any]) -> str | None:
     return "Yiping Lu" if name.casefold() in CREATOR_ALIASES else name
 
 
+def _domain_stem(value: str) -> str:
+    host = value.strip().casefold().removeprefix("https://").removeprefix("http://")
+    host = host.split("/", 1)[0].split(":", 1)[0].removeprefix("www.")
+    labels = [label for label in host.split(".") if label]
+    return labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+
+
+def _comparable_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
 class TwentyGraphRepository:
     """Build a query-scoped graph from Twenty without reading private contents."""
 
@@ -129,6 +140,16 @@ class TwentyGraphRepository:
         }
         """
         companies = self._items(self.graphql(company_query, {"filter": clauses[0]})["companies"])
+        if actual == QueryKind.DOMAIN and not companies:
+            # Some Twenty records have a company name but no populated domain field.
+            # Use only an exact normalized name match derived from the domain stem.
+            stem = _domain_stem(query)
+            if stem:
+                name_matches = self._find_target(stem, QueryKind.COMPANY_NAME)
+                companies = [
+                    company for company in name_matches
+                    if _comparable_name(str(company.get("name") or "")) == _comparable_name(stem)
+                ]
         if actual == QueryKind.COMPANY_NAME:
             needle = query.strip().casefold()
             companies.sort(key=lambda company: (str(company.get("name") or "").casefold() != needle))

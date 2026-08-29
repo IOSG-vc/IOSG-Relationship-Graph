@@ -1,6 +1,6 @@
 import pytest
 
-from relationship_graph.adapters.twenty import TwentyGraphRepository, _creator_name
+from relationship_graph.adapters.twenty import TwentyGraphRepository, _creator_name, _domain_stem
 from relationship_graph.engine import IntroductionPathService
 from relationship_graph.models import QueryKind
 
@@ -93,6 +93,15 @@ class CreatorFallbackTwenty(FakeTwenty):
         return []
 
 
+class MissingDomainTwenty(FakeTwenty):
+    def graphql(self, query, variables=None):
+        if "FindCompanies" in query:
+            company_filter = (variables or {}).get("filter") or {}
+            if "domainName" in company_filter:
+                return {"companies": {"edges": []}}
+        return super().graphql(query, variables)
+
+
 def test_twenty_builds_privacy_safe_ranked_path():
     result = IntroductionPathService(FakeTwenty()).search("Acme", QueryKind.COMPANY_NAME)
     assert result.status == "ok"
@@ -149,3 +158,13 @@ def test_creator_aliases_are_bundled_as_yiping_lu(raw_name):
 
 def test_other_creator_names_are_unchanged():
     assert _creator_name({"createdBy": {"name": "Momir Amidzic"}}) == "Momir Amidzic"
+
+
+def test_domain_stem_ignores_scheme_www_port_and_path():
+    assert _domain_stem("https://www.eigenlayer.xyz:443/about") == "eigenlayer"
+
+
+def test_missing_twenty_domain_falls_back_to_exact_company_name():
+    repository = MissingDomainTwenty()
+    matches = repository._find_target("acme.xyz", QueryKind.DOMAIN)
+    assert [company["name"] for company in matches] == ["Acme"]
