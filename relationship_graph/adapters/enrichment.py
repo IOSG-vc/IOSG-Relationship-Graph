@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,6 +21,62 @@ class SurfProvider(Protocol):
 
 class FollowProvider(Protocol):
     def followers(self, handles: list[str]) -> dict[str, list[dict[str, Any]]]: ...
+
+
+class ProfileProvider(Protocol):
+    def profiles(self, handles: list[str]) -> dict[str, dict[str, Any]]: ...
+
+
+class SorsaProfileClient:
+    """Fetch the small public-profile surface needed for bio-derived leads."""
+
+    def __init__(self, api_key: str, base_url: str = "https://api.sorsa.io/v3", timeout: int = 20):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def profiles(self, handles: list[str]) -> dict[str, dict[str, Any]]:
+        clean = sorted({normalize_handle(value) for value in handles if value})
+        if not clean:
+            return {}
+        response = requests.get(
+            f"{self.base_url}/info-batch", headers={"ApiKey": self.api_key},
+            params=[("usernames[]", handle) for handle in clean], timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("data") if isinstance(payload, dict) else payload
+        if isinstance(items, dict):
+            items = items.get("users") or items.get("profiles") or []
+        result = {
+            normalize_handle(str(item.get("username") or "")): item
+            for item in (items or []) if item.get("username")
+        }
+        for handle in clean:
+            result.setdefault(handle, {"username": handle, "_fetch_status": "not_found"})
+        return result
+
+
+FORMER_COMPANY_PATTERNS = (
+    re.compile(r"\b(?:ex[- ]|formerly\s+(?:at\s+)?|previously\s+(?:at\s+)?)(@?[A-Za-z0-9][A-Za-z0-9 .&+_-]{1,48})", re.I),
+)
+
+
+def former_companies_from_bio(description: str) -> list[str]:
+    """Extract conservative former-employer leads from a self-authored X bio."""
+    found: list[str] = []
+    for pattern in FORMER_COMPANY_PATTERNS:
+        for match in pattern.finditer(description or ""):
+            candidate = re.split(
+                r"[,;|/\n]|\s[·•]\s|\s(?:now|building|founder|investor)\b",
+                match.group(1), maxsplit=1, flags=re.I,
+            )[0]
+            candidate = candidate.strip(" ._-@")
+            if len(candidate) < 2 or candidate.casefold() in {"ceo", "cto", "founder", "web3", "crypto"}:
+                continue
+            if candidate.casefold() not in {item.casefold() for item in found}:
+                found.append(candidate)
+    return found[:5]
 
 
 class SurfClient:
@@ -209,6 +266,127 @@ class NeonFollowProvider:
                     "last_confirmed": confirmed.isoformat() if confirmed else None,
                 })
             return result
+
+    @staticmethod
+    def _ensure_profile_tables(cursor: Any) -> None:
+        cursor.execute(
+            """
+            create table if not exists deals.x_profile_cache (
+                x_username text primary key,
+                x_user_id text,
+                display_name text,
+                description text,
+                bio_urls jsonb not null default '[]'::jsonb,
+                profile_payload jsonb not null default '{}'::jsonb,
+                profile_hash text,
+                fetch_status text not null,
+                fetched_at timestamptz not null default now()
+            )
+            """
+        )
+        cursor.execute(
+            """
+            create table if not exists deals.x_profile_employment_claims (
+                x_username text not null,
+                company_text text not null,
+                normalized_company_name text not null,
+                evidence_excerpt text,
+                profile_hash text not null,
+                resolution_status text not null default 'candidate',
+                twenty_company_id text,
+                first_seen timestamptz not null default now(),
+                last_confirmed timestamptz not null default now(),
+                is_active boolean not null default true,
+                primary key (x_username, normalized_company_name, profile_hash)
+            )
+            """
+        )
+
+    def cached_profiles(self, handles: list[str], ttl_days: int) -> dict[str, dict[str, Any]]:
+        clean = sorted({normalize_handle(handle) for handle in handles if handle})
+        if not self.database_url or not clean:
+            return {}
+        import psycopg2
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            self._ensure_profile_tables(cursor)
+            cursor.execute(
+                """
+                select x_username, profile_payload, fetch_status, fetched_at,
+                       fetched_at >= now() - make_interval(days => %s)
+                from deals.x_profile_cache where x_username = any(%s)
+                """,
+                (ttl_days, clean),
+            )
+            return {
+                row[0]: {**(row[1] or {}), "_fetch_status": row[2], "_fetched_at": row[3].isoformat(), "_cache_fresh": row[4]}
+                for row in cursor.fetchall()
+            }
+
+    def store_profiles(self, profiles: dict[str, dict[str, Any]]) -> int:
+        if not self.database_url or not profiles:
+            return 0
+        import psycopg2
+        from psycopg2.extras import Json
+        rows = []
+        for handle, profile in profiles.items():
+            status = str(profile.get("_fetch_status") or "ok")
+            clean_profile = {key: value for key, value in profile.items() if not key.startswith("_")}
+            description = str(clean_profile.get("description") or "")
+            profile_hash = hashlib.sha256(description.encode()).hexdigest()
+            rows.append((
+                normalize_handle(handle), clean_profile.get("id"), clean_profile.get("display_name"),
+                description, Json(clean_profile.get("bio_urls") or []), Json(clean_profile),
+                profile_hash, status,
+            ))
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            self._ensure_profile_tables(cursor)
+            cursor.executemany(
+                """
+                insert into deals.x_profile_cache (
+                    x_username, x_user_id, display_name, description, bio_urls,
+                    profile_payload, profile_hash, fetch_status, fetched_at
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                on conflict (x_username) do update set
+                    x_user_id = excluded.x_user_id, display_name = excluded.display_name,
+                    description = excluded.description, bio_urls = excluded.bio_urls,
+                    profile_payload = excluded.profile_payload, profile_hash = excluded.profile_hash,
+                    fetch_status = excluded.fetch_status, fetched_at = now()
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def store_employment_claims(self, handle: str, description: str,
+                                companies: list[str]) -> int:
+        if not self.database_url:
+            return 0
+        import psycopg2
+        profile_hash = hashlib.sha256(description.encode()).hexdigest()
+        rows = [(
+            normalize_handle(handle), company, re.sub(r"[^a-z0-9]", "", company.casefold()),
+            description[:240], profile_hash,
+        ) for company in companies]
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            self._ensure_profile_tables(cursor)
+            cursor.execute(
+                "update deals.x_profile_employment_claims set is_active = false where x_username = %s and profile_hash <> %s",
+                (normalize_handle(handle), profile_hash),
+            )
+            if rows:
+                cursor.executemany(
+                    """
+                    insert into deals.x_profile_employment_claims (
+                        x_username, company_text, normalized_company_name,
+                        evidence_excerpt, profile_hash
+                    ) values (%s, %s, %s, %s, %s)
+                    on conflict (x_username, normalized_company_name, profile_hash) do update set
+                        company_text = excluded.company_text,
+                        evidence_excerpt = excluded.evidence_excerpt,
+                        last_confirmed = now(), is_active = true
+                    """,
+                    rows,
+                )
+        return len(rows)
 
     def find_companies(self, query: str, kind: QueryKind) -> list[dict[str, Any]]:
         if not self.database_url:
@@ -477,10 +655,16 @@ class EnrichedGraphRepository:
     """Decorate a primary graph with sourced Surf roles and Neon follow signals."""
 
     def __init__(self, base: GraphRepository, surf: SurfProvider | None = None,
-                 follows: FollowProvider | None = None):
+                 follows: FollowProvider | None = None,
+                 profiles: ProfileProvider | None = None,
+                 profile_cache_ttl_days: int = 90,
+                 profile_max_founders: int = 3):
         self.base = base
         self.surf = surf
         self.follows = follows
+        self.profiles = profiles
+        self.profile_cache_ttl_days = profile_cache_ttl_days
+        self.profile_max_founders = profile_max_founders
         self._nodes: dict[str, Node] = {}
         self._edges: dict[str, Edge] = {}
         self._source_diagnostics: dict[str, Any] = {}
@@ -499,7 +683,7 @@ class EnrichedGraphRepository:
             "twenty": {"status": "ok", "mode": "live"},
             "surf": {"status": "not_configured" if not self.surf else "not_needed"},
             "neon": {"status": "not_configured" if not self.follows else "ok"},
-            "sorsa": {"status": "not_configured" if not self.follows else "cached_in_neon"},
+            "sorsa": {"status": "configured" if self.profiles else ("cached_in_neon" if self.follows else "not_configured")},
         }
         actual_kind = infer_kind(query) if kind == QueryKind.AUTO else kind
         preloaded_neon: list[dict[str, Any]] = []
@@ -619,6 +803,8 @@ class EnrichedGraphRepository:
                 self._source_diagnostics["surf"] = {"status": "error", "error": type(exc).__name__}
         elif neon_people:
             self._source_diagnostics["surf"] = {"status": "cached_in_neon", "team_members": len(neon_people)}
+        if self.profiles:
+            self._source_diagnostics["sorsa_profiles"] = {"status": "pending_no_path_fallback"}
         if self.surf and surf_ref and hasattr(self.surf, "funding"):
             try:
                 investors = funding_investors(self.surf.funding(surf_ref))  # type: ignore[attr-defined]
@@ -660,6 +846,75 @@ class EnrichedGraphRepository:
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["sorsa"] = {"status": "error", "error": type(exc).__name__}
         return [self._nodes.get(target.id, target)]
+
+    def enrich_no_path(self, target: Node) -> None:
+        if not self.profiles:
+            return
+        founders = [
+            node for node in self._nodes.values()
+            if node.kind == "person" and node.x_handle and any(
+                edge.source == node.id and edge.target == target.id and edge.relationship == "founder_of"
+                for edge in self._edges.values()
+            )
+        ][:self.profile_max_founders]
+        handles = [normalize_handle(node.x_handle or "") for node in founders]
+        cached: dict[str, dict[str, Any]] = {}
+        if self.follows and hasattr(self.follows, "cached_profiles"):
+            try:
+                cached = self.follows.cached_profiles(handles, self.profile_cache_ttl_days)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                cached = {}
+        fresh = {handle: profile for handle, profile in cached.items() if profile.get("_cache_fresh")}
+        stale = {handle: profile for handle, profile in cached.items() if not profile.get("_cache_fresh")}
+        to_fetch = [handle for handle in handles if handle not in fresh]
+        fetched: dict[str, dict[str, Any]] = {}
+        fetch_error: str | None = None
+        if to_fetch:
+            try:
+                fetched = self.profiles.profiles(to_fetch)
+                if self.follows and hasattr(self.follows, "store_profiles"):
+                    self.follows.store_profiles(fetched)  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                fetch_error = type(exc).__name__
+        profile_map = {**stale, **fresh, **fetched}
+        candidates_found = 0
+        matched_companies = 0
+        paths_added = 0
+        claims_stored = 0
+        for founder in founders:
+            handle = normalize_handle(founder.x_handle or "")
+            profile = profile_map.get(handle) or {}
+            if profile.get("_fetch_status") == "not_found":
+                continue
+            description = str(profile.get("description") or "")
+            companies = former_companies_from_bio(description)
+            candidates_found += len(companies)
+            if self.follows and hasattr(self.follows, "store_employment_claims"):
+                claims_stored += self.follows.store_employment_claims(handle, description, companies)  # type: ignore[attr-defined]
+            if companies and hasattr(self.base, "add_former_company_paths"):
+                outcome = self.base.add_former_company_paths(target, founder, companies, description)  # type: ignore[attr-defined]
+                paths_added += int(outcome.get("paths_added", 0))
+                matched_companies += int(outcome.get("matched_companies", 0))
+        if matched_companies:
+            self._nodes.update({node.id: node for node in self.base.nodes()})
+            self._edges.update({edge.id: edge for edge in self.base.edges()})
+        status = "error" if fetch_error and not profile_map else ("stale_cache" if fetch_error else "ok")
+        self._source_diagnostics["sorsa_profiles"] = {
+            "status": status, "fallback_triggered": True,
+            "founders_considered": len(founders), "cache_hits": len(fresh),
+            "stale_cache_hits": len(stale) if fetch_error else 0,
+            "profiles_fetched": sum(item.get("_fetch_status") != "not_found" for item in fetched.values()),
+            "not_found_cached": sum(item.get("_fetch_status") == "not_found" for item in fetched.values()),
+            "former_company_candidates": candidates_found,
+            "claims_stored": claims_stored, "companies_exactly_matched": matched_companies,
+            "paths_added": paths_added, **({"error": fetch_error} if fetch_error else {}),
+        }
+
+    def skip_no_path_enrichment(self) -> None:
+        if self.profiles:
+            self._source_diagnostics["sorsa_profiles"] = {
+                "status": "skipped_existing_paths", "fallback_triggered": False,
+            }
 
     def _add_neon_people(self, target: Node, people: list[dict[str, Any]]) -> None:
         confidence_values = {"high": 0.95, "medium": 0.75, "low": 0.50}

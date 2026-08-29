@@ -383,6 +383,105 @@ class TwentyGraphRepository:
                         evidence_source="twenty", observed_at=person.get("createdAt") or now,
                     ))
 
+    def add_former_company_paths(self, target: Node, founder: Node, company_names: list[str],
+                                 bio: str) -> dict[str, int]:
+        """Add bounded paths only when a bio lead exactly resolves to a Twenty company."""
+        now = datetime.now(timezone.utc).isoformat()
+        added = 0
+        matched = 0
+        for candidate in company_names[:5]:
+            matches = self._find_target(candidate, QueryKind.COMPANY_NAME)
+            exact = next((item for item in matches if _comparable_name(str(item.get("name") or "")) == _comparable_name(candidate)), None)
+            if not exact or f"twenty:company:{exact['id']}" == target.id:
+                continue
+            matched += 1
+            company_node = Node(
+                id=f"twenty:company:{exact['id']}", label=str(exact.get("name") or candidate),
+                kind="company", x_handle=_handle(exact.get("xLink")),
+                metadata={"source": "twenty", "discovered_via": "sorsa_x_bio"},
+            )
+            self._node(company_node)
+            self._edge(Edge(
+                id=f"sorsa:former-company:{founder.id}:{exact['id']}",
+                source=company_node.id, target=founder.id, relationship="former_employee_of",
+                confidence=0.50,
+                evidence=(f"{founder.label}'s public X bio mentions former affiliation with "
+                          f"{company_node.label}; Twenty contains an exact company match. Bio: {bio[:240]}"),
+                evidence_source="sorsa_twenty", observed_at=now,
+            ))
+            warm_people = [
+                person for person in self._people(exact["id"])
+                if person.get("introDistance") == 0 or person.get("introducedById")
+                or person.get("relationshipStrength") in {"HOT", "WARM"}
+            ][:3]
+            introducer_ids = [person.get("introducedById") for person in warm_people if person.get("introducedById")]
+            introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
+            for person in warm_people:
+                contact = Node(
+                    id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Known contact",
+                    kind="person", x_handle=_handle(person.get("xLink")),
+                )
+                self._node(contact)
+                self._edge(Edge(
+                    id=f"twenty:former-company-contact:{person['id']}:{exact['id']}",
+                    source=contact.id, target=company_node.id, relationship="works_at", confidence=0.85,
+                    evidence=f"Twenty lists {contact.label} as a warm contact at {company_node.label}.",
+                    evidence_source="twenty", observed_at=now,
+                ))
+                introducer = introducers.get(person.get("introducedById"))
+                if introducer:
+                    owner = Node(
+                        id=f"twenty:person:{introducer['id']}", label=_name(introducer.get("name")) or "IOSG",
+                        kind="iosg_member" if introducer.get("isIosgTeam") else "person",
+                    )
+                    self._node(owner)
+                    self._edge(Edge(
+                        id=f"twenty:former-company-introducer:{introducer['id']}:{person['id']}",
+                        source=owner.id, target=contact.id, relationship="existing_introducer", confidence=0.94,
+                        evidence=f"Twenty records {owner.label} as introducer for {contact.label}.",
+                        evidence_source="twenty", observed_at=now,
+                    ))
+                    added += 1
+                    continue
+                interaction_owners = self._interaction_owners(person["id"])[:1]
+                if interaction_owners:
+                    interaction = interaction_owners[0]
+                    owner = Node(
+                        id=f"twenty:workspace:{interaction['id']}",
+                        label=interaction.get("name") or "IOSG", kind="iosg_member",
+                    )
+                    self._node(owner)
+                    confidence = min(
+                        0.95, 0.72 + min(interaction["email_count"], 5) * 0.025
+                        + min(interaction["meeting_count"], 3) * 0.05,
+                    )
+                    self._edge(Edge(
+                        id=f"twenty:former-company-interaction:{interaction['id']}:{person['id']}",
+                        source=owner.id, target=contact.id,
+                        relationship="email_calendar_interaction", confidence=confidence,
+                        evidence=(f"Twenty records {interaction['email_count']} email interaction(s) and "
+                                  f"{interaction['meeting_count']} meeting(s); no contents were requested."),
+                        evidence_source="twenty", observed_at=interaction.get("last"),
+                    ))
+                    added += 1
+                    continue
+                if person.get("introDistance") == 0 and _creator_name(person):
+                    creator_name = _creator_name(person) or "IOSG"
+                    actor = person.get("createdBy") or {}
+                    owner = Node(
+                        id=f"twenty:creator:{actor.get('workspaceMemberId') or creator_name.casefold()}",
+                        label=creator_name, kind="iosg_member",
+                    )
+                    self._node(owner)
+                    self._edge(Edge(
+                        id=f"twenty:former-company-creator:{person['id']}", source=owner.id,
+                        target=contact.id, relationship="created_by_fallback", confidence=0.55,
+                        evidence=f"Twenty marks {contact.label} with introduction distance 0; {creator_name} owns the record.",
+                        evidence_source="twenty", observed_at=person.get("createdAt") or now,
+                    ))
+                    added += 1
+        return {"paths_added": added, "matched_companies": matched}
+
     def resolve(self, query: str, kind: QueryKind) -> list[Node]:
         self._nodes.clear()
         self._edges.clear()

@@ -63,6 +63,22 @@ from `deals.iosg_x_following`. Those snapshots are expected to be synchronized f
 out of band; the request path does not download complete following lists. PostgreSQL support
 is included in the standard installation; use `pip install -e '.[dev]'` for development tools.
 
+When `SORSA_API_KEY` is set, public founder profiles are a no-path fallback: the service first
+ranks all normal Twenty, Surf, Neon, investor, referral, interaction, and follow paths, and does
+not call Sorsa if any path exists. If none exists, it checks up to three founders. Profiles are
+cached in Neon for 90 days, including not-found results, and missing or expired profiles are
+retrieved with one bounded Sorsa batch request. Configure this behavior with
+`SORSA_PROFILE_CACHE_TTL_DAYS` (default `90`), `SORSA_PROFILE_MAX_FOUNDERS` (default `3`), and
+`SORSA_PROFILE_TIMEOUT_SECONDS` (default `8`).
+
+Only explicit bio phrases such as `ex-Coinbase`, `formerly at Meta`, or `previously at Google`
+become former-company candidates. Extracted claims are stored by profile hash so claims from a
+changed bio can be made inactive. A candidate must exactly match a company in Twenty before it
+is added to the graph. The service can then rank a bounded path such as
+`IOSG member → warm contact → former company → founder → current company`. Named introducers,
+email/calendar interaction owners, and `created_by_fallback` can anchor these paths. Bio-derived
+employment edges use low confidence because an X bio is self-authored and may be stale.
+
 To inspect the raw Surf responses used by the app (`search`, `team`, and `funding`), run:
 
 ```bash

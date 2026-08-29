@@ -4,7 +4,7 @@ import heapq
 import math
 from collections import defaultdict
 
-from .models import Edge, PathResult, QueryKind, SearchResponse
+from .models import Edge, Node, PathResult, QueryKind, SearchResponse
 from .repository import GraphRepository
 
 MAX_HOPS = 4
@@ -65,54 +65,19 @@ class IntroductionPathService:
 
     def search(self, query: str, kind: QueryKind = QueryKind.AUTO, limit: int = 5) -> SearchResponse:
         matches = self.repository.resolve(query, kind)
-        nodes = {node.id: node for node in self.repository.nodes()}
         if not matches:
             return SearchResponse(status="not_found", query=query, diagnostics={"matched_targets": 0})
         target = matches[0]
-        edges = [edge for edge in self.repository.edges() if not edge.private]
-        adjacency: dict[str, list[tuple[str, Edge]]] = defaultdict(list)
-        for edge in edges:
-            adjacency[edge.source].append((edge.target, edge))
-            adjacency[edge.target].append((edge.source, edge))
-
-        starts = [node for node in nodes.values() if node.kind == "iosg_member"]
-        candidates: list[tuple[float, list[str], list[Edge]]] = []
-        for start in starts:
-            queue: list[tuple[float, str, list[str], list[Edge]]] = [(0.0, start.id, [start.id], [])]
-            while queue:
-                cost, current, visited, path_edges = heapq.heappop(queue)
-                if current == target.id and path_edges:
-                    candidates.append((cost, visited, path_edges))
-                    continue
-                if len(path_edges) >= MAX_HOPS:
-                    continue
-                for neighbor, edge in adjacency.get(current, []):
-                    if neighbor in visited:
-                        continue
-                    # Product of edge confidence expressed as additive negative log cost.
-                    edge_cost = -math.log(max(edge.confidence, 0.01)) + 0.08
-                    heapq.heappush(queue, (cost + edge_cost, neighbor, visited + [neighbor], path_edges + [edge]))
-
-        candidates.sort(key=lambda item: (item[0], len(item[2])))
-        results: list[PathResult] = []
-        seen: set[tuple[str, ...]] = set()
-        for cost, node_ids, path_edges in candidates:
-            key = tuple(node_ids)
-            if key in seen:
-                continue
-            seen.add(key)
-            reliability = math.prod(edge.confidence for edge in path_edges)
-            score = round(100 * reliability * (0.96 ** max(0, len(path_edges) - 1)))
-            contact = nodes[node_ids[0]].label
-            results.append(PathResult(
-                rank=len(results) + 1,
-                score=score,
-                confidence=_confidence(score),
-                path=[nodes[node_id].label for node_id in node_ids],
-                iosg_contact=contact,
-                edges=path_edges,
-                suggested_next_action=_next_action(contact, path_edges),
-            ))
+        nodes, edges, results = self._rank(target)
+        if not results:
+            fallback = getattr(self.repository, "enrich_no_path", None)
+            if callable(fallback):
+                fallback(target)
+                nodes, edges, results = self._rank(target)
+        else:
+            skipped = getattr(self.repository, "skip_no_path_enrichment", None)
+            if callable(skipped):
+                skipped()
         total_paths_found = len(results)
         results = _diverse_results(results, limit)
 
@@ -140,3 +105,40 @@ class IntroductionPathService:
             outreach_context=recent_context,
             diagnostics=diagnostics,
         )
+
+    def _rank(self, target: Node) -> tuple[dict[str, Node], list[Edge], list[PathResult]]:
+        nodes = {node.id: node for node in self.repository.nodes()}
+        edges = [edge for edge in self.repository.edges() if not edge.private]
+        adjacency: dict[str, list[tuple[str, Edge]]] = defaultdict(list)
+        for edge in edges:
+            adjacency[edge.source].append((edge.target, edge))
+            adjacency[edge.target].append((edge.source, edge))
+        candidates: list[tuple[float, list[str], list[Edge]]] = []
+        for start in (node for node in nodes.values() if node.kind == "iosg_member"):
+            queue: list[tuple[float, str, list[str], list[Edge]]] = [(0.0, start.id, [start.id], [])]
+            while queue:
+                cost, current, visited, path_edges = heapq.heappop(queue)
+                if current == target.id and path_edges:
+                    candidates.append((cost, visited, path_edges))
+                    continue
+                if len(path_edges) >= MAX_HOPS:
+                    continue
+                for neighbor, edge in adjacency.get(current, []):
+                    if neighbor not in visited:
+                        edge_cost = -math.log(max(edge.confidence, 0.01)) + 0.08
+                        heapq.heappush(queue, (cost + edge_cost, neighbor, visited + [neighbor], path_edges + [edge]))
+        candidates.sort(key=lambda item: (item[0], len(item[2])))
+        results: list[PathResult] = []
+        seen: set[tuple[str, ...]] = set()
+        for _, node_ids, path_edges in candidates:
+            if tuple(node_ids) in seen:
+                continue
+            seen.add(tuple(node_ids))
+            score = round(100 * math.prod(edge.confidence for edge in path_edges) * (0.96 ** max(0, len(path_edges) - 1)))
+            contact = nodes[node_ids[0]].label
+            results.append(PathResult(
+                rank=len(results) + 1, score=score, confidence=_confidence(score),
+                path=[nodes[node_id].label for node_id in node_ids], iosg_contact=contact,
+                edges=path_edges, suggested_next_action=_next_action(contact, path_edges),
+            ))
+        return nodes, edges, results

@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from .engine import IntroductionPathService
 from .models import SearchRequest, SearchResponse
 from .adapters.twenty import TwentyError, TwentyGraphRepository
-from .adapters.enrichment import EnrichedGraphRepository, NeonFollowProvider, SurfClient
+from .adapters.enrichment import EnrichedGraphRepository, NeonFollowProvider, SorsaProfileClient, SurfClient
 from .adapters.relationship_owner import RelationshipOwnerClient
 from .repository import JsonGraphRepository
 
@@ -38,12 +38,20 @@ def service() -> IntroductionPathService:
             owner_provider=owner_provider,
         )
         surf_key = os.getenv("SURF_API_KEY", "")
+        sorsa_key = os.getenv("SORSA_API_KEY", "")
+        sorsa_timeout = int(os.getenv("SORSA_PROFILE_TIMEOUT_SECONDS", "8"))
         database_url = os.getenv("NEON_DATABASE_URL") or os.getenv("DATABASE_URL", "")
-        if surf_key or database_url:
+        if surf_key or database_url or sorsa_key:
             repository = EnrichedGraphRepository(
                 repository,
                 surf=SurfClient(surf_key) if surf_key else None,
                 follows=NeonFollowProvider(database_url) if database_url else None,
+                profiles=(SorsaProfileClient(
+                    sorsa_key, os.getenv("SORSA_BASE_URL", "https://api.sorsa.io/v3"),
+                    timeout=sorsa_timeout,
+                ) if sorsa_key else None),
+                profile_cache_ttl_days=int(os.getenv("SORSA_PROFILE_CACHE_TTL_DAYS", "90")),
+                profile_max_founders=int(os.getenv("SORSA_PROFILE_MAX_FOUNDERS", "3")),
             )
         return IntroductionPathService(repository)
     data_path = os.getenv("RELATIONSHIP_GRAPH_DATA", str(ROOT / "fixtures" / "demo_graph.json"))
@@ -148,14 +156,15 @@ def source_diagnostics() -> dict[str, object]:
     sources: dict[str, object] = {
         "twenty": {"status": "configured" if os.getenv("TWENTY_BASE_URL") and os.getenv("TWENTY_API_KEY") else "not_configured"},
         "surf": {"status": "configured" if os.getenv("SURF_API_KEY") else "not_configured"},
-        "sorsa": {"status": "cached_in_neon" if database_url else "not_configured"},
+        "sorsa": {"status": "configured" if os.getenv("SORSA_API_KEY") else ("cached_in_neon" if database_url else "not_configured")},
         "relationship_api": {"status": "configured" if os.getenv("RELATIONSHIP_API_BASE_URL") and os.getenv("RELATIONSHIP_API_KEY") else "not_configured"},
     }
     if database_url:
         try:
             sources["neon"] = NeonFollowProvider(database_url).sync_status()
             if isinstance(sources["neon"], dict):
-                sources["sorsa"] = {"status": "cached_in_neon", **sources["neon"]}
+                sorsa_status = "configured" if os.getenv("SORSA_API_KEY") else "cached_in_neon"
+                sources["sorsa"] = {**sources["neon"], "status": sorsa_status}
         except Exception as exc:  # noqa: BLE001
             sources["neon"] = {"status": "error", "error": type(exc).__name__}
     else:

@@ -1,4 +1,7 @@
-from relationship_graph.adapters.enrichment import EnrichedGraphRepository, funding_investors, outreach_context, select_surf_project
+from relationship_graph.adapters.enrichment import (
+    EnrichedGraphRepository, former_companies_from_bio, funding_investors,
+    outreach_context, select_surf_project,
+)
 from relationship_graph.engine import IntroductionPathService
 from relationship_graph.models import Edge, Node, QueryKind
 
@@ -46,6 +49,56 @@ class Follows:
         }]}
 
 
+class Profiles:
+    def __init__(self):
+        self.calls = []
+
+    def profiles(self, handles):
+        self.calls.append(handles)
+        assert handles == ["ada"]
+        return {"ada": {"description": "Building Acme. Previously at Coinbase."}}
+
+
+class FormerCompanyBase(BaseRepository):
+    def __init__(self):
+        self.added = []
+
+    def add_former_company_paths(self, target, founder, companies, bio):
+        self.added.append((target.label, founder.label, companies, bio))
+        return {"paths_added": 1, "matched_companies": 1}
+
+
+class CachedProfiles:
+    def __init__(self):
+        self.claims = []
+
+    def cached_profiles(self, handles, ttl_days):
+        assert handles == ["ada"]
+        assert ttl_days == 90
+        return {"ada": {
+            "description": "Previously at Coinbase", "_fetch_status": "ok",
+            "_cache_fresh": True, "_fetched_at": "2026-08-01T00:00:00Z",
+        }}
+
+    def store_employment_claims(self, handle, description, companies):
+        self.claims.append((handle, description, companies))
+        return len(companies)
+
+
+class ExistingPathBase(BaseRepository):
+    member = Node(id="iosg:jocy", label="Jocy", kind="iosg_member")
+
+    def nodes(self):
+        return [self.target, self.member]
+
+    def edges(self):
+        return [Edge(
+            id="direct", source=self.member.id, target=self.target.id,
+            relationship="direct_company_relationship", confidence=0.8,
+            evidence="Existing path", evidence_source="twenty",
+        )]
+
+
 class Neon(Follows):
     stored = []
 
@@ -76,6 +129,49 @@ def test_surf_and_neon_add_sourced_weak_follow_path():
     assert [edge.evidence_source for edge in result.recommended.edges] == ["sorsa_neon", "surf"]
     assert "not proof" in result.recommended.edges[0].evidence
     assert result.recommended.edges[1].confidence == 0.95
+
+
+def test_sorsa_bio_discovers_former_company_for_surf_founder():
+    base = FormerCompanyBase()
+    repository = EnrichedGraphRepository(base, surf=Surf(), profiles=Profiles())
+    result = IntroductionPathService(repository).search("@acme", QueryKind.PROJECT_X)
+
+    assert base.added == [("Acme", "Ada", ["Coinbase"], "Building Acme. Previously at Coinbase.")]
+    assert result.diagnostics["sources"]["sorsa_profiles"]["status"] == "ok"
+    assert result.diagnostics["sources"]["sorsa_profiles"]["fallback_triggered"] is True
+    assert result.diagnostics["sources"]["sorsa_profiles"]["former_company_candidates"] == 1
+    assert result.diagnostics["sources"]["sorsa_profiles"]["paths_added"] == 1
+
+
+def test_fresh_neon_profile_cache_avoids_sorsa_call():
+    base = FormerCompanyBase()
+    cache = CachedProfiles()
+    profiles = Profiles()
+    repository = EnrichedGraphRepository(base, surf=Surf(), follows=cache, profiles=profiles)
+    result = IntroductionPathService(repository).search("@acme", QueryKind.PROJECT_X)
+
+    diagnostics = result.diagnostics["sources"]["sorsa_profiles"]
+    assert profiles.calls == []
+    assert diagnostics["cache_hits"] == 1
+    assert diagnostics["profiles_fetched"] == 0
+    assert cache.claims == [("ada", "Previously at Coinbase", ["Coinbase"])]
+
+
+def test_existing_path_skips_sorsa_profiles_entirely():
+    profiles = Profiles()
+    repository = EnrichedGraphRepository(ExistingPathBase(), profiles=profiles)
+    result = IntroductionPathService(repository).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.recommended.path == ["Jocy", "Acme"]
+    assert profiles.calls == []
+    assert result.diagnostics["sources"]["sorsa_profiles"] == {
+        "status": "skipped_existing_paths", "fallback_triggered": False,
+    }
+
+
+def test_former_company_parser_requires_explicit_history_language():
+    assert former_companies_from_bio("ex-Coinbase | formerly at Meta; building Acme") == ["Coinbase", "Meta"]
+    assert former_companies_from_bio("Founder at Acme. Interested in Coinbase.") == []
 
 
 def test_surf_can_resolve_project_handle_missing_from_twenty():

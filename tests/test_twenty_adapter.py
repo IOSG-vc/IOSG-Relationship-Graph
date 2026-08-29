@@ -2,7 +2,7 @@ import pytest
 
 from relationship_graph.adapters.twenty import TwentyGraphRepository, _creator_name, _domain_stem
 from relationship_graph.engine import IntroductionPathService
-from relationship_graph.models import QueryKind
+from relationship_graph.models import Node, QueryKind
 
 
 class FakeTwenty(TwentyGraphRepository):
@@ -102,6 +102,27 @@ class MissingDomainTwenty(FakeTwenty):
         return super().graphql(query, variables)
 
 
+class FormerCompanyTwenty(FakeTwenty):
+    def _find_target(self, query, kind):
+        if query == "Coinbase":
+            return [{"id": "coinbase-1", "name": "Coinbase"}]
+        return super()._find_target(query, kind)
+
+    def _people(self, company_id):
+        if company_id == "coinbase-1":
+            return [{
+                "id": "coinbase-contact", "name": {"firstName": "Casey", "lastName": "Contact"},
+                "relationshipStrength": "WARM", "introducedById": "iosg-1", "introDistance": 1,
+                "xLink": {"primaryLinkUrl": "https://x.com/casey"},
+            }]
+        return super()._people(company_id)
+
+    def _people_by_ids(self, ids):
+        if ids == ["iosg-1"]:
+            return [{"id": "iosg-1", "name": {"firstName": "Jocy", "lastName": ""}, "isIosgTeam": True}]
+        return super()._people_by_ids(ids)
+
+
 def test_twenty_builds_privacy_safe_ranked_path():
     result = IntroductionPathService(FakeTwenty()).search("Acme", QueryKind.COMPANY_NAME)
     assert result.status == "ok"
@@ -111,6 +132,21 @@ def test_twenty_builds_privacy_safe_ranked_path():
     assert "1 email interaction" in evidence
     assert "1 meeting" in evidence
     assert "contents were requested" in evidence
+
+
+def test_sorsa_bio_company_must_exactly_match_twenty_before_path_is_added():
+    repository = FormerCompanyTwenty()
+    target = repository.resolve("Acme", QueryKind.COMPANY_NAME)[0]
+    founder = next(node for node in repository.nodes() if node.label == "Ada Founder")
+
+    assert repository.add_former_company_paths(
+        target, founder, ["Coinbase", "Coin"], "Previously at Coinbase",
+    ) == {"paths_added": 1, "matched_companies": 1}
+    relationships = {edge.relationship for edge in repository.edges()}
+    assert {"former_employee_of", "works_at", "existing_introducer"} <= relationships
+    former_edge = next(edge for edge in repository.edges() if edge.relationship == "former_employee_of")
+    assert former_edge.confidence == 0.50
+    assert former_edge.evidence_source == "sorsa_twenty"
 
 
 def test_existing_referral_ranks_above_interaction_metadata():
