@@ -11,6 +11,11 @@ from ..models import Edge, Node, QueryKind
 from ..repository import infer_kind, normalize_handle
 
 
+CREATOR_ALIASES = {
+    "yiping lu", "mac studio claude", "workflow", "yiping lu mcp", "mcp member",
+}
+
+
 class TwentyError(RuntimeError):
     """Twenty rejected a request or returned an invalid response."""
 
@@ -36,6 +41,14 @@ def _role_relationship(job_title: str | None) -> tuple[str, float]:
     if re.search(r"\b(ceo|cto|coo|cfo|chief|president|partner)\b", title, re.I):
         return "executive_of", 0.90
     return "employee_of", 0.72 if title else 0.55
+
+
+def _creator_name(person: dict[str, Any]) -> str | None:
+    """Return the requested human attribution for a Twenty record creator."""
+    name = str((person.get("createdBy") or {}).get("name") or "").strip()
+    if not name:
+        return None
+    return "Yiping Lu" if name.casefold() in CREATOR_ALIASES else name
 
 
 class TwentyGraphRepository:
@@ -136,6 +149,7 @@ class TwentyGraphRepository:
           people(first: 100, filter: {companyId: {eq: $companyId}}) { edges { node {
             id name { firstName lastName } jobTitle companyId isIosgTeam
             relationshipStrength introducedById introDistance xLink { primaryLinkUrl }
+            createdAt createdBy { source workspaceMemberId name }
           } } }
         }
         """
@@ -329,13 +343,23 @@ class TwentyGraphRepository:
                         evidence_source="twenty", observed_at=now,
                     ))
                 elif person.get("introDistance") == 0:
-                    iosg = Node(id="iosg:unresolved", label="IOSG", kind="iosg_member")
-                    self._node(iosg)
+                    creator_name = _creator_name(person)
+                    if not creator_name:
+                        continue
+                    actor = person.get("createdBy") or {}
+                    creator_id = str(actor.get("workspaceMemberId") or creator_name.casefold())
+                    creator = Node(
+                        id=f"twenty:creator:{creator_id}", label=creator_name,
+                        kind="iosg_member",
+                    )
+                    self._node(creator)
                     self._edge(Edge(
-                        id=f"twenty:investor-direct:{person['id']}", source=iosg.id,
-                        target=person_node.id, relationship="direct_relationship", confidence=0.80,
-                        evidence="Twenty marks this investor contact with introduction distance 0.",
-                        evidence_source="twenty", observed_at=now,
+                        id=f"twenty:investor-creator:{person['id']}", source=creator.id,
+                        target=person_node.id, relationship="created_by_fallback", confidence=0.55,
+                        evidence=(f"Twenty marks this investor contact with introduction distance 0 but has no "
+                                  f"named introducer; {creator_name} is used as the fallback because the "
+                                  "person record was created by them or their bundled automation."),
+                        evidence_source="twenty", observed_at=person.get("createdAt") or now,
                     ))
 
     def resolve(self, query: str, kind: QueryKind) -> list[Node]:
@@ -375,16 +399,6 @@ class TwentyGraphRepository:
                 evidence=f"Twenty lists {person_node.label} as {person.get('jobTitle') or 'a team member'} at {company_node.label}.",
                 evidence_source="twenty", observed_at=now,
             ))
-            if person.get("introDistance") == 0 and not person.get("introducedById"):
-                iosg = Node(id="iosg:unresolved", label="IOSG", kind="iosg_member")
-                self._node(iosg)
-                self._edge(Edge(
-                    id=f"twenty:direct:{person['id']}", source=iosg.id, target=person_node.id,
-                    relationship="direct_relationship", confidence=0.80,
-                    evidence=("Twenty marks this person with introduction distance 0. "
-                              "The specific IOSG relationship owner is not yet resolved."),
-                    evidence_source="twenty", observed_at=now,
-                ))
             introducer = introducers.get(person.get("introducedById"))
             if introducer:
                 connector = Node(id=f"twenty:person:{introducer['id']}", label=_name(introducer.get("name")), kind="iosg_member" if introducer.get("isIosgTeam") else "person")
@@ -397,10 +411,12 @@ class TwentyGraphRepository:
                 ))
             external_owner = self.owner_provider.resolve(person["id"]) if self.owner_provider else None
             owners = [external_owner] if external_owner else self._interaction_owners(person["id"])[:3]
+            usable_owner = False
             for owner in owners:
                 count = owner["email_count"] + owner["meeting_count"]
                 if not count:
                     continue
+                usable_owner = True
                 owner_node = Node(id=f"twenty:workspace:{owner['id']}", label=owner["name"] or "IOSG", kind="iosg_member")
                 self._node(owner_node)
                 confidence = min(0.95, 0.72 + min(owner["email_count"], 5) * 0.025 + min(owner["meeting_count"], 3) * 0.05)
@@ -412,6 +428,24 @@ class TwentyGraphRepository:
                               "No message or event contents were requested."),
                     evidence_source="twenty", observed_at=owner["last"],
                 ))
+            if (person.get("introDistance") == 0 and not introducer and not usable_owner):
+                creator_name = _creator_name(person)
+                if creator_name:
+                    actor = person.get("createdBy") or {}
+                    creator_id = str(actor.get("workspaceMemberId") or creator_name.casefold())
+                    creator = Node(
+                        id=f"twenty:creator:{creator_id}", label=creator_name,
+                        kind="iosg_member",
+                    )
+                    self._node(creator)
+                    self._edge(Edge(
+                        id=f"twenty:creator-fallback:{person['id']}", source=creator.id,
+                        target=person_node.id, relationship="created_by_fallback", confidence=0.55,
+                        evidence=(f"Twenty marks this person with introduction distance 0 but has no named "
+                                  f"introducer or interaction owner; {creator_name} is used as the fallback "
+                                  "because the record was created by them or their bundled automation."),
+                        evidence_source="twenty", observed_at=person.get("createdAt") or now,
+                    ))
         target_ids = set(people_by_id)
         for connection in self._social_connections(list(target_ids)):
             left = connection.get("person") or {}
