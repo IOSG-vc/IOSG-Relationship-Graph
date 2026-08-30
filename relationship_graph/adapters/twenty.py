@@ -13,6 +13,7 @@ from ..repository import infer_kind, normalize_handle
 
 CREATOR_ALIASES = {
     "yiping lu", "mac studio claude", "workflow", "yiping lu mcp", "mcp member",
+    "crm dedupe runner",
 }
 
 
@@ -136,6 +137,7 @@ class TwentyGraphRepository:
         query FindCompanies($filter: CompanyFilterInput!) {
           companies(first: 20, filter: $filter) { edges { node {
             id name domainName { primaryLinkUrl } xLink { primaryLinkUrl }
+            introDistance createdAt createdBy { source workspaceMemberId name }
           } } }
         }
         """
@@ -409,6 +411,24 @@ class TwentyGraphRepository:
                           f"{company_node.label}; Twenty contains an exact company match. Bio: {bio[:240]}"),
                 evidence_source="sorsa_twenty", observed_at=now,
             ))
+            if exact.get("introDistance") == 0:
+                creator_name = _creator_name(exact)
+                if creator_name:
+                    actor = exact.get("createdBy") or {}
+                    creator = Node(
+                        id=f"twenty:creator:{actor.get('workspaceMemberId') or creator_name.casefold()}",
+                        label=creator_name, kind="iosg_member",
+                    )
+                    self._node(creator)
+                    self._edge(Edge(
+                        id=f"twenty:former-company-creator:{exact['id']}",
+                        source=creator.id, target=company_node.id,
+                        relationship="created_by_fallback", confidence=0.55,
+                        evidence=(f"Twenty marks {company_node.label} with introduction distance 0; "
+                                  f"{creator_name} created the company record or its bundled automation did."),
+                        evidence_source="twenty", observed_at=exact.get("createdAt") or now,
+                    ))
+                    added += 1
             warm_people = [
                 person for person in self._people(exact["id"])
                 if person.get("introDistance") == 0 or person.get("introducedById")
@@ -500,11 +520,30 @@ class TwentyGraphRepository:
             },
         )
         self._node(company_node)
+        now = datetime.now(timezone.utc).isoformat()
+        if company.get("introDistance") == 0:
+            creator_name = _creator_name(company)
+            if creator_name:
+                actor = company.get("createdBy") or {}
+                creator_id = str(actor.get("workspaceMemberId") or creator_name.casefold())
+                creator = Node(
+                    id=f"twenty:creator:{creator_id}", label=creator_name,
+                    kind="iosg_member",
+                )
+                self._node(creator)
+                self._edge(Edge(
+                    id=f"twenty:company-creator-fallback:{company['id']}",
+                    source=creator.id, target=company_node.id,
+                    relationship="created_by_fallback", confidence=0.55,
+                    evidence=(f"Twenty marks this company with introduction distance 0; "
+                              f"{creator_name} is used as the fallback because the company "
+                              "record was created by them or their bundled automation."),
+                    evidence_source="twenty", observed_at=company.get("createdAt") or now,
+                ))
         people = self._people(company["id"])
         people_by_id = {person["id"]: person for person in people}
         introducer_ids = [person.get("introducedById") for person in people if person.get("introducedById")]
         introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
-        now = datetime.now(timezone.utc).isoformat()
         for person in people:
             person_node = Node(
                 id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Unknown person",

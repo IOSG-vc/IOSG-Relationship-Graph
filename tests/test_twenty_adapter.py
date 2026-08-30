@@ -123,6 +123,20 @@ class FormerCompanyTwenty(FakeTwenty):
         return super()._people_by_ids(ids)
 
 
+class CompanyCreatorTwenty(FakeTwenty):
+    def _find_target(self, query, kind):
+        companies = super()._find_target(query, kind)
+        companies[0].update({
+            "introDistance": 0,
+            "createdAt": "2026-08-01T00:00:00Z",
+            "createdBy": {"source": "API", "workspaceMemberId": None, "name": "CRM dedupe runner"},
+        })
+        return companies
+
+    def _people(self, company_id):
+        return []
+
+
 def test_twenty_builds_privacy_safe_ranked_path():
     result = IntroductionPathService(FakeTwenty()).search("Acme", QueryKind.COMPANY_NAME)
     assert result.status == "ok"
@@ -184,9 +198,17 @@ def test_created_by_is_used_only_when_direct_owner_is_unresolved():
     assert result.recommended.edges[0].confidence == 0.55
 
 
+def test_company_created_by_can_anchor_a_direct_fallback_path():
+    result = IntroductionPathService(CompanyCreatorTwenty()).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.recommended.path == ["Yiping Lu", "Acme"]
+    assert result.recommended.edges[0].relationship == "created_by_fallback"
+    assert result.recommended.edges[0].confidence == 0.55
+
+
 @pytest.mark.parametrize(
     "raw_name",
-    ["Yiping Lu", "Mac studio claude", "Workflow", "Yiping Lu MCP", "MCP Member"],
+    ["Yiping Lu", "Mac studio claude", "Workflow", "Yiping Lu MCP", "MCP Member", "CRM dedupe runner"],
 )
 def test_creator_aliases_are_bundled_as_yiping_lu(raw_name):
     assert _creator_name({"createdBy": {"name": raw_name}}) == "Yiping Lu"
