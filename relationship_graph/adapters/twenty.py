@@ -39,6 +39,8 @@ def _role_relationship(job_title: str | None) -> tuple[str, float]:
     title = job_title or ""
     if re.search(r"\b(co[- ]?founder|founder|founding partner)\b", title, re.I):
         return "founder_of", 0.95
+    if re.search(r"\badvis(?:or|er|ory)\b", title, re.I):
+        return "advisor_of", 0.82
     if re.search(r"\b(ceo|cto|coo|cfo|chief|president|partner)\b", title, re.I):
         return "executive_of", 0.90
     return "employee_of", 0.72 if title else 0.55
@@ -137,7 +139,8 @@ class TwentyGraphRepository:
         query FindCompanies($filter: CompanyFilterInput!) {
           companies(first: 20, filter: $filter) { edges { node {
             id name domainName { primaryLinkUrl } xLink { primaryLinkUrl }
-            introDistance createdAt createdBy { source workspaceMemberId name }
+            introDistance associatedPeopleId associated2Id
+            createdAt createdBy { source workspaceMemberId name }
           } } }
         }
         """
@@ -186,6 +189,8 @@ class TwentyGraphRepository:
         query PeopleByIds($ids: [UUID!]!) {
           people(first: 100, filter: {id: {in: $ids}}) { edges { node {
             id name { firstName lastName } jobTitle isIosgTeam xLink { primaryLinkUrl }
+            relationshipStrength introducedById introDistance createdAt
+            createdBy { source workspaceMemberId name }
           } } }
         }
         """
@@ -291,6 +296,131 @@ class TwentyGraphRepository:
         }
         """
         return self._items(self.graphql(query, {"ids": person_ids})["companies"])
+
+    def _add_target_associated_people(self, company: dict[str, Any], company_node: Node,
+                                      current_people_ids: set[str], observed_at: str) -> None:
+        """Add creator-owned paths through people associated directly with the target company."""
+        associated_ids = [
+            person_id for person_id in (company.get("associatedPeopleId"), company.get("associated2Id"))
+            if person_id and person_id not in current_people_ids
+        ]
+        for person in self._people_by_ids(associated_ids)[:3]:
+            contact = Node(
+                id=f"twenty:person:{person['id']}",
+                label=_name(person.get("name")) or "Known contact",
+                kind="person", x_handle=_handle(person.get("xLink")),
+                metadata={"job_title": person.get("jobTitle"), "source": "twenty"},
+            )
+            self._node(contact)
+            relationship, confidence = _role_relationship(person.get("jobTitle"))
+            self._edge(Edge(
+                id=f"twenty:target-associated:{person['id']}:{company['id']}",
+                source=contact.id, target=company_node.id,
+                relationship=relationship, confidence=confidence,
+                evidence=(f"Twenty lists {contact.label} as {person.get('jobTitle') or 'an associated person'} "
+                          f"for {company_node.label}."),
+                evidence_source="twenty", observed_at=observed_at,
+            ))
+            creator_name = _creator_name(person)
+            if not creator_name:
+                continue
+            actor = person.get("createdBy") or {}
+            creator = Node(
+                id=f"twenty:creator:{actor.get('workspaceMemberId') or creator_name.casefold()}",
+                label=creator_name, kind="iosg_member",
+            )
+            self._node(creator)
+            self._edge(Edge(
+                id=f"twenty:target-associated-creator:{person['id']}",
+                source=creator.id, target=contact.id,
+                relationship="created_by_fallback", confidence=0.55,
+                evidence=(f"{creator_name} is used as the relationship owner because Twenty records "
+                          f"that they created {contact.label}'s associated-person record."),
+                evidence_source="twenty", observed_at=person.get("createdAt") or observed_at,
+            ))
+
+    def _add_associated_company_anchors(self, company: Node, people: list[dict[str, Any]],
+                                        observed_at: str) -> int:
+        """Connect a bounded set of warm contacts to a historical company."""
+        warm_people = [
+            person for person in people
+            if person.get("relationshipStrength") in {"HOT", "WARM"}
+            or person.get("introDistance") == 0
+        ][:3]
+        introducer_ids = [person.get("introducedById") for person in warm_people if person.get("introducedById")]
+        introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
+        anchors = 0
+        for person in warm_people:
+            contact = Node(
+                id=f"twenty:person:{person['id']}",
+                label=_name(person.get("name")) or "Known contact",
+                kind="person", x_handle=_handle(person.get("xLink")),
+            )
+            self._node(contact)
+            self._edge(Edge(
+                id=f"twenty:associated-company-contact:{person['id']}:{company.id}",
+                source=contact.id, target=company.id, relationship="works_at", confidence=0.85,
+                evidence=f"Twenty lists {contact.label} as a warm contact at {company.label}.",
+                evidence_source="twenty", observed_at=observed_at,
+            ))
+            introducer = introducers.get(person.get("introducedById"))
+            if introducer:
+                owner = Node(
+                    id=f"twenty:person:{introducer['id']}",
+                    label=_name(introducer.get("name")) or "IOSG",
+                    kind="iosg_member" if introducer.get("isIosgTeam") else "person",
+                )
+                self._node(owner)
+                self._edge(Edge(
+                    id=f"twenty:associated-company-introducer:{introducer['id']}:{person['id']}",
+                    source=owner.id, target=contact.id,
+                    relationship="existing_introducer", confidence=0.94,
+                    evidence=f"Twenty records {owner.label} as introducer for {contact.label}.",
+                    evidence_source="twenty", observed_at=observed_at,
+                ))
+                anchors += 1
+                continue
+            interactions = self._interaction_owners(person["id"])[:1]
+            if interactions:
+                interaction = interactions[0]
+                owner = Node(
+                    id=f"twenty:workspace:{interaction['id']}",
+                    label=interaction.get("name") or "IOSG", kind="iosg_member",
+                )
+                self._node(owner)
+                confidence = min(
+                    0.95, 0.72 + min(interaction["email_count"], 5) * 0.025
+                    + min(interaction["meeting_count"], 3) * 0.05,
+                )
+                self._edge(Edge(
+                    id=f"twenty:associated-company-interaction:{interaction['id']}:{person['id']}",
+                    source=owner.id, target=contact.id,
+                    relationship="email_calendar_interaction", confidence=confidence,
+                    evidence=(f"Twenty records {interaction['email_count']} email interaction(s) and "
+                              f"{interaction['meeting_count']} meeting(s); no contents were requested."),
+                    evidence_source="twenty", observed_at=interaction.get("last"),
+                ))
+                anchors += 1
+                continue
+            if person.get("introDistance") == 0:
+                creator_name = _creator_name(person)
+                if creator_name:
+                    actor = person.get("createdBy") or {}
+                    owner = Node(
+                        id=f"twenty:creator:{actor.get('workspaceMemberId') or creator_name.casefold()}",
+                        label=creator_name, kind="iosg_member",
+                    )
+                    self._node(owner)
+                    self._edge(Edge(
+                        id=f"twenty:associated-company-creator:{person['id']}",
+                        source=owner.id, target=contact.id,
+                        relationship="created_by_fallback", confidence=0.55,
+                        evidence=(f"Twenty marks {contact.label} with introduction distance 0; "
+                                  f"{creator_name} owns the record."),
+                        evidence_source="twenty", observed_at=person.get("createdAt") or observed_at,
+                    ))
+                    anchors += 1
+        return anchors
 
     def add_investor_paths(self, target: Node, investors: list[dict[str, Any]]) -> None:
         """Attach bounded, evidence-backed paths through investor firms known in Twenty."""
@@ -521,27 +651,27 @@ class TwentyGraphRepository:
         )
         self._node(company_node)
         now = datetime.now(timezone.utc).isoformat()
-        if company.get("introDistance") == 0:
-            creator_name = _creator_name(company)
-            if creator_name:
-                actor = company.get("createdBy") or {}
-                creator_id = str(actor.get("workspaceMemberId") or creator_name.casefold())
-                creator = Node(
-                    id=f"twenty:creator:{creator_id}", label=creator_name,
-                    kind="iosg_member",
-                )
-                self._node(creator)
-                self._edge(Edge(
-                    id=f"twenty:company-creator-fallback:{company['id']}",
-                    source=creator.id, target=company_node.id,
-                    relationship="created_by_fallback", confidence=0.55,
-                    evidence=(f"Twenty marks this company with introduction distance 0; "
-                              f"{creator_name} is used as the fallback because the company "
-                              "record was created by them or their bundled automation."),
-                    evidence_source="twenty", observed_at=company.get("createdAt") or now,
-                ))
+        creator_name = _creator_name(company)
+        if creator_name:
+            actor = company.get("createdBy") or {}
+            creator_id = str(actor.get("workspaceMemberId") or creator_name.casefold())
+            creator = Node(
+                id=f"twenty:creator:{creator_id}", label=creator_name,
+                kind="iosg_member",
+            )
+            self._node(creator)
+            self._edge(Edge(
+                id=f"twenty:company-creator-fallback:{company['id']}",
+                source=creator.id, target=company_node.id,
+                relationship="created_by_fallback", confidence=0.55,
+                evidence=(f"{creator_name} is used as a low-confidence fallback because "
+                          "Twenty records that the company was created by them or their "
+                          "bundled automation."),
+                evidence_source="twenty", observed_at=company.get("createdAt") or now,
+            ))
         people = self._people(company["id"])
         people_by_id = {person["id"]: person for person in people}
+        self._add_target_associated_people(company, company_node, set(people_by_id), now)
         introducer_ids = [person.get("introducedById") for person in people if person.get("introducedById")]
         introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
         for person in people:
@@ -716,24 +846,28 @@ class TwentyGraphRepository:
                                   f"{owner['meeting_count']} meeting(s); no contents were requested."),
                         evidence_source="twenty", observed_at=owner.get("last"),
                     ))
-        for employer in self._past_employers(list(people_by_id))[:20]:
+        # Associated People is a historical-company relation, distinct from the
+        # current Company.people / Person.companyId membership used above.
+        for employer in self._past_employers(list(people_by_id))[:5]:
+            if employer.get("id") == company["id"]:
+                continue
             ids = [employer.get("associatedPeopleId"), employer.get("associated2Id")]
             target_ids = set(ids) & set(people_by_id)
-            connector_ids = [value for value in ids if value and value not in target_ids]
-            for connector in self._people_by_ids(connector_ids):
-                if not connector.get("isIosgTeam"):
-                    continue
-                connector_node = Node(
-                    id=f"twenty:person:{connector['id']}", label=_name(connector.get("name")) or "IOSG",
-                    kind="iosg_member", x_handle=_handle(connector.get("xLink")),
-                )
-                self._node(connector_node)
-                for target_id in target_ids:
-                    self._edge(Edge(
-                        id=f"twenty:past-employer:{employer['id']}:{connector['id']}:{target_id}",
-                        source=connector_node.id, target=f"twenty:person:{target_id}",
-                        relationship="past_employer_overlap", confidence=0.65,
-                        evidence=f"Twenty associates both people with former employer {employer.get('name') or 'Unknown company'}.",
-                        evidence_source="twenty", observed_at=now,
-                    ))
+            if not target_ids:
+                continue
+            employer_node = Node(
+                id=f"twenty:company:{employer['id']}",
+                label=employer.get("name") or "Associated company", kind="company",
+            )
+            self._node(employer_node)
+            for target_id in target_ids:
+                self._edge(Edge(
+                    id=f"twenty:associated-company:{employer['id']}:{target_id}",
+                    source=employer_node.id, target=f"twenty:person:{target_id}",
+                    relationship="former_employee_of", confidence=0.72,
+                    evidence=(f"Twenty associates {self._nodes[f'twenty:person:{target_id}'].label} "
+                              f"with former company {employer_node.label}."),
+                    evidence_source="twenty", observed_at=now,
+                ))
+            self._add_associated_company_anchors(employer_node, self._people(employer["id"]), now)
         return [company_node]

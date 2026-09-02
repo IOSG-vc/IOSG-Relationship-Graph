@@ -127,13 +127,60 @@ class CompanyCreatorTwenty(FakeTwenty):
     def _find_target(self, query, kind):
         companies = super()._find_target(query, kind)
         companies[0].update({
-            "introDistance": 0,
+            "introDistance": None,
             "createdAt": "2026-08-01T00:00:00Z",
             "createdBy": {"source": "API", "workspaceMemberId": None, "name": "CRM dedupe runner"},
         })
         return companies
 
     def _people(self, company_id):
+        return []
+
+
+class AssociatedCompanyTwenty(FakeTwenty):
+    def _interaction_owners(self, person_id):
+        return []
+
+    def _past_employers(self, person_ids):
+        assert person_ids == ["founder-1"]
+        return [{
+            "id": "coinbase-1", "name": "Coinbase",
+            "associatedPeopleId": "founder-1", "associated2Id": None,
+        }]
+
+    def _people(self, company_id):
+        if company_id == "coinbase-1":
+            return [{
+                "id": "coinbase-contact", "name": {"firstName": "Casey", "lastName": "Contact"},
+                "relationshipStrength": "WARM", "introducedById": "iosg-1", "introDistance": 1,
+                "xLink": {"primaryLinkUrl": "https://x.com/casey"},
+            }]
+        return super()._people(company_id)
+
+    def _people_by_ids(self, ids):
+        if ids == ["iosg-1"]:
+            return [{"id": "iosg-1", "name": {"firstName": "Jocy", "lastName": ""}, "isIosgTeam": True}]
+        return super()._people_by_ids(ids)
+
+
+class TargetAssociatedPersonTwenty(FakeTwenty):
+    def _find_target(self, query, kind):
+        companies = super()._find_target(query, kind)
+        companies[0].update({"associatedPeopleId": "advisor-1", "associated2Id": None})
+        return companies
+
+    def _people(self, company_id):
+        return []
+
+    def _people_by_ids(self, ids):
+        if ids == ["advisor-1"]:
+            return [{
+                "id": "advisor-1", "name": {"firstName": "Suyang", "lastName": ""},
+                "jobTitle": "Advisor", "isIosgTeam": False,
+                "createdAt": "2026-08-20T00:00:00Z",
+                "createdBy": {"source": "MANUAL", "workspaceMemberId": "momir-1", "name": "Momir Amidzic"},
+                "xLink": {"primaryLinkUrl": "https://x.com/suyang"},
+            }]
         return []
 
 
@@ -198,12 +245,33 @@ def test_created_by_is_used_only_when_direct_owner_is_unresolved():
     assert result.recommended.edges[0].confidence == 0.55
 
 
-def test_company_created_by_can_anchor_a_direct_fallback_path():
+def test_company_created_by_can_anchor_a_direct_fallback_path_without_intro_distance():
     result = IntroductionPathService(CompanyCreatorTwenty()).search("Acme", QueryKind.COMPANY_NAME)
 
     assert result.recommended.path == ["Yiping Lu", "Acme"]
     assert result.recommended.edges[0].relationship == "created_by_fallback"
     assert result.recommended.edges[0].confidence == 0.55
+
+
+def test_associated_people_builds_a_former_company_path():
+    result = IntroductionPathService(AssociatedCompanyTwenty()).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.recommended.path == ["Jocy", "Casey Contact", "Coinbase", "Ada Founder", "Acme"]
+    assert [edge.relationship for edge in result.recommended.edges] == [
+        "existing_introducer", "works_at", "former_employee_of", "founder_of",
+    ]
+    assert result.recommended.edges[2].evidence_source == "twenty"
+
+
+def test_target_associated_advisor_created_by_builds_path_without_intro_distance():
+    result = IntroductionPathService(TargetAssociatedPersonTwenty()).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.recommended.path == ["Momir Amidzic", "Suyang", "Acme"]
+    assert [edge.relationship for edge in result.recommended.edges] == [
+        "created_by_fallback", "advisor_of",
+    ]
+    assert result.recommended.score > 32
+    assert "created Suyang's associated-person record" in result.recommended.edges[0].evidence
 
 
 @pytest.mark.parametrize(
