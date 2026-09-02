@@ -166,7 +166,11 @@ class AssociatedCompanyTwenty(FakeTwenty):
 class TargetAssociatedPersonTwenty(FakeTwenty):
     def _find_target(self, query, kind):
         companies = super()._find_target(query, kind)
-        companies[0].update({"associatedPeopleId": "advisor-1", "associated2Id": None})
+        companies[0].update({
+            "associatedPeopleId": "advisor-1", "associated2Id": None,
+            "createdAt": "2026-08-01T00:00:00Z",
+            "createdBy": {"source": "API", "workspaceMemberId": None, "name": "CRM dedupe runner"},
+        })
         return companies
 
     def _people(self, company_id):
@@ -177,6 +181,7 @@ class TargetAssociatedPersonTwenty(FakeTwenty):
             return [{
                 "id": "advisor-1", "name": {"firstName": "Suyang", "lastName": ""},
                 "jobTitle": "Advisor", "isIosgTeam": False,
+                "introDistance": 0,
                 "createdAt": "2026-08-20T00:00:00Z",
                 "createdBy": {"source": "MANUAL", "workspaceMemberId": "momir-1", "name": "Momir Amidzic"},
                 "xLink": {"primaryLinkUrl": "https://x.com/suyang"},
@@ -270,8 +275,9 @@ def test_target_associated_advisor_created_by_builds_path_without_intro_distance
     assert [edge.relationship for edge in result.recommended.edges] == [
         "created_by_fallback", "advisor_of",
     ]
-    assert result.recommended.score > 32
-    assert "created Suyang's associated-person record" in result.recommended.edges[0].evidence
+    assert result.recommended.score > 55
+    assert result.recommended.edges[0].confidence == 0.88
+    assert "introduction distance 0" in result.recommended.edges[0].evidence
 
 
 @pytest.mark.parametrize(

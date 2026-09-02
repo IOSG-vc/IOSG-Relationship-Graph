@@ -325,6 +325,8 @@ class TwentyGraphRepository:
             if not creator_name:
                 continue
             actor = person.get("createdBy") or {}
+            is_direct = person.get("introDistance") == 0
+            creator_confidence = 0.88 if is_direct else 0.55
             creator = Node(
                 id=f"twenty:creator:{actor.get('workspaceMemberId') or creator_name.casefold()}",
                 label=creator_name, kind="iosg_member",
@@ -333,8 +335,11 @@ class TwentyGraphRepository:
             self._edge(Edge(
                 id=f"twenty:target-associated-creator:{person['id']}",
                 source=creator.id, target=contact.id,
-                relationship="created_by_fallback", confidence=0.55,
-                evidence=(f"{creator_name} is used as the relationship owner because Twenty records "
+                relationship="created_by_fallback", confidence=creator_confidence,
+                evidence=(f"Twenty records {contact.label} with introduction distance 0 and "
+                          f"{creator_name} as creator of the associated-person record."
+                          if is_direct else
+                          f"{creator_name} is used as the relationship owner because Twenty records "
                           f"that they created {contact.label}'s associated-person record."),
                 evidence_source="twenty", observed_at=person.get("createdAt") or observed_at,
             ))
