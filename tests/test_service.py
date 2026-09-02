@@ -56,6 +56,8 @@ def test_web_app_is_served():
     assert 'id="apiKey"' not in response.text
     assert "Why now · what to mention" in response.text
     assert "Introduction path via" in response.text
+    assert 'class="profile-link"' in response.text
+    assert "path.path_nodes" in response.text
     assert "should lead" not in response.text
 
 

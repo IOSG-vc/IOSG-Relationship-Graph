@@ -25,6 +25,7 @@ class Node(BaseModel):
     label: str
     kind: str
     x_handle: str | None = None
+    linkedin_url: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -45,6 +46,7 @@ class PathResult(BaseModel):
     score: int
     confidence: str
     path: list[str]
+    path_nodes: list[Node] = Field(default_factory=list)
     iosg_contact: str
     edges: list[Edge]
     suggested_next_action: str

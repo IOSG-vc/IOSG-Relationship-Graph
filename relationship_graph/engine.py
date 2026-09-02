@@ -139,6 +139,7 @@ class IntroductionPathService:
             results.append(PathResult(
                 rank=len(results) + 1, score=score, confidence=_confidence(score),
                 path=[nodes[node_id].label for node_id in node_ids], iosg_contact=contact,
+                path_nodes=[nodes[node_id] for node_id in node_ids],
                 edges=path_edges, suggested_next_action=_next_action(contact, path_edges),
             ))
         return nodes, edges, results

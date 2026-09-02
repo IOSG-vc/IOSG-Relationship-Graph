@@ -185,6 +185,7 @@ class TargetAssociatedPersonTwenty(FakeTwenty):
                 "createdAt": "2026-08-20T00:00:00Z",
                 "createdBy": {"source": "MANUAL", "workspaceMemberId": "momir-1", "name": "Momir Amidzic"},
                 "xLink": {"primaryLinkUrl": "https://x.com/suyang"},
+                "linkedinLink": {"primaryLinkUrl": "https://linkedin.com/in/suyang-yang"},
             }]
         return []
 
@@ -278,6 +279,9 @@ def test_target_associated_advisor_created_by_builds_path_without_intro_distance
     assert result.recommended.score > 55
     assert result.recommended.edges[0].confidence == 0.88
     assert "introduction distance 0" in result.recommended.edges[0].evidence
+    suyang = result.recommended.path_nodes[1]
+    assert suyang.x_handle == "suyang"
+    assert suyang.linkedin_url == "https://linkedin.com/in/suyang-yang"
 
 
 @pytest.mark.parametrize(

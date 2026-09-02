@@ -35,6 +35,13 @@ def _handle(link: Any) -> str | None:
     return clean or None
 
 
+def _linkedin(link: Any) -> str | None:
+    if isinstance(link, dict):
+        link = link.get("primaryLinkUrl")
+    value = str(link or "").strip()
+    return value if value.startswith(("https://linkedin.com/", "https://www.linkedin.com/")) else None
+
+
 def _role_relationship(job_title: str | None) -> tuple[str, float]:
     title = job_title or ""
     if re.search(r"\b(co[- ]?founder|founder|founding partner)\b", title, re.I):
@@ -175,6 +182,7 @@ class TwentyGraphRepository:
           people(first: 100, filter: {companyId: {eq: $companyId}}) { edges { node {
             id name { firstName lastName } jobTitle companyId isIosgTeam
             relationshipStrength introducedById introDistance xLink { primaryLinkUrl }
+            linkedinLink { primaryLinkUrl }
             createdAt createdBy { source workspaceMemberId name }
           } } }
         }
@@ -189,6 +197,7 @@ class TwentyGraphRepository:
         query PeopleByIds($ids: [UUID!]!) {
           people(first: 100, filter: {id: {in: $ids}}) { edges { node {
             id name { firstName lastName } jobTitle isIosgTeam xLink { primaryLinkUrl }
+            linkedinLink { primaryLinkUrl }
             relationshipStrength introducedById introDistance createdAt
             createdBy { source workspaceMemberId name }
           } } }
@@ -309,6 +318,7 @@ class TwentyGraphRepository:
                 id=f"twenty:person:{person['id']}",
                 label=_name(person.get("name")) or "Known contact",
                 kind="person", x_handle=_handle(person.get("xLink")),
+                linkedin_url=_linkedin(person.get("linkedinLink")),
                 metadata={"job_title": person.get("jobTitle"), "source": "twenty"},
             )
             self._node(contact)
@@ -360,6 +370,7 @@ class TwentyGraphRepository:
                 id=f"twenty:person:{person['id']}",
                 label=_name(person.get("name")) or "Known contact",
                 kind="person", x_handle=_handle(person.get("xLink")),
+                linkedin_url=_linkedin(person.get("linkedinLink")),
             )
             self._node(contact)
             self._edge(Edge(
@@ -473,8 +484,9 @@ class TwentyGraphRepository:
             introducers = {person["id"]: person for person in self._people_by_ids(introducer_ids)}
             for person in warm_people:
                 person_node = Node(
-                    id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Known contact",
+                id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Known contact",
                     kind="person", x_handle=_handle(person.get("xLink")),
+                    linkedin_url=_linkedin(person.get("linkedinLink")),
                 )
                 self._node(person_node)
                 self._edge(Edge(
@@ -575,6 +587,7 @@ class TwentyGraphRepository:
                 contact = Node(
                     id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Known contact",
                     kind="person", x_handle=_handle(person.get("xLink")),
+                    linkedin_url=_linkedin(person.get("linkedinLink")),
                 )
                 self._node(contact)
                 self._edge(Edge(
@@ -683,6 +696,7 @@ class TwentyGraphRepository:
             person_node = Node(
                 id=f"twenty:person:{person['id']}", label=_name(person.get("name")) or "Unknown person",
                 kind="person", x_handle=_handle(person.get("xLink")),
+                linkedin_url=_linkedin(person.get("linkedinLink")),
                 metadata={"job_title": person.get("jobTitle"), "source": "twenty"},
             )
             self._node(person_node)
@@ -831,6 +845,7 @@ class TwentyGraphRepository:
                 connector_node = Node(
                     id=f"twenty:person:{connector['id']}", label=_name(connector.get("name")) or "Known contact",
                     kind="person", x_handle=_handle(connector.get("xLink")),
+                    linkedin_url=_linkedin(connector.get("linkedinLink")),
                 )
                 self._node(connector_node)
                 self._edge(Edge(
