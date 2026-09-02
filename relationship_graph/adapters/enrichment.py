@@ -692,12 +692,15 @@ class EnrichedGraphRepository:
                 preloaded_neon = self.follows.find_companies(query, kind)  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["neon"] = {"status": "error", "error": type(exc).__name__}
-        # Exact cached associations avoid fuzzy remote matches and several slow fallback queries.
+        # Twenty remains authoritative for relationship edges. An exact cached Neon
+        # company may replace only a fuzzy Twenty company-name match, not bypass a
+        # valid Twenty target (which would discard its people and referral graph).
+        base_matches = self.base.resolve(query, kind)
         use_neon_resolution = bool(
-            preloaded_neon
-            and actual_kind in {QueryKind.COMPANY_NAME, QueryKind.PROJECT_X, QueryKind.FOUNDER_X}
+            preloaded_neon and base_matches and actual_kind == QueryKind.COMPANY_NAME
+            and base_matches[0].label.strip().casefold() != query.strip().casefold()
         )
-        matches = [] if use_neon_resolution else self.base.resolve(query, kind)
+        matches = [] if use_neon_resolution else base_matches
         self._nodes = {} if use_neon_resolution else {node.id: node for node in self.base.nodes()}
         self._edges = {} if use_neon_resolution else {edge.id: edge for edge in self.base.edges()}
         surf_members: list[dict[str, Any]] | None = None

@@ -201,6 +201,15 @@ def test_exact_neon_company_name_wins_over_fuzzy_base_match():
     assert result.recommended.path == ["Jocy", "Ada", "Acme"]
 
 
+def test_exact_twenty_match_keeps_primary_relationship_edges_when_neon_is_cached():
+    repository = EnrichedGraphRepository(ExistingPathBase(), surf=None, follows=Neon())
+    result = IntroductionPathService(repository).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.resolved_target.id == "company:acme"
+    assert result.recommended.path == ["Jocy", "Acme"]
+    assert result.recommended.edges[0].evidence_source == "twenty"
+
+
 def test_company_name_discovers_stores_and_uses_surf_team():
     neon = Neon()
     neon.find_companies = lambda query, kind: []
