@@ -1,6 +1,6 @@
 from relationship_graph.adapters.enrichment import (
-    EnrichedGraphRepository, former_companies_from_bio, funding_investors,
-    outreach_context, select_surf_project,
+    EnrichedGraphRepository, _surf_identity_queries, _verified_surf_identity,
+    former_companies_from_bio, funding_investors, outreach_context, select_surf_project,
 )
 from relationship_graph.engine import IntroductionPathService
 from relationship_graph.models import Edge, Node, QueryKind
@@ -287,3 +287,24 @@ def test_surf_news_uses_original_company_query_when_twenty_label_is_fuzzy():
     assert surf.searches == ["Ethena"]
     assert [item.title for item in result.outreach_context] == ["Ethena update"]
     assert result.diagnostics["sources"]["ai_news"]["items"] == 1
+
+
+def test_surf_identity_candidates_cover_domain_handle_crm_and_neon_values():
+    target = Node(
+        id="company:1", label="Acme Labs", kind="company", x_handle="acmeprotocol",
+        metadata={"domain": "https://www.acme.xyz/about"},
+    )
+    candidates = _surf_identity_queries(
+        "https://acme.xyz", QueryKind.DOMAIN, target,
+        {"name": "Acme Protocol", "x_handle": "acme"},
+    )
+
+    assert candidates == [
+        "https://acme.xyz", "acme", "acmeprotocol", "Acme Labs", "Acme Protocol",
+    ]
+
+
+def test_surf_identity_requires_exact_name_slug_or_symbol_across_candidates():
+    candidates = ["EigenLayer", "eigenlayer.xyz", "eigenlayer"]
+    assert _verified_surf_identity({"name": "EigenCloud", "slug": "eigenlayer"}, candidates)
+    assert not _verified_surf_identity({"name": "Eigen Something", "slug": "eigen-something"}, candidates)

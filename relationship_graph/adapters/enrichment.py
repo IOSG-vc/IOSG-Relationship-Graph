@@ -10,7 +10,7 @@ import requests
 
 from ..models import Edge, Node, QueryKind
 from ..repository import GraphRepository, infer_kind, normalize_handle
-from .twenty import _role_relationship
+from .twenty import _domain_stem, _role_relationship
 
 X_URL_RE = re.compile(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,50})", re.I)
 
@@ -184,6 +184,49 @@ def select_surf_project(projects: list[dict[str, Any]], query: str) -> dict[str,
         return (0 if needle in normalized else 1, str(project.get("name") or ""))
 
     return min(projects, key=rank)
+
+
+def _identity_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold().lstrip("@"))
+
+
+def _surf_identity_queries(query: str, kind: QueryKind, target: Node,
+                           neon_company: dict[str, Any] | None = None) -> list[str]:
+    """Order distinct public identity candidates from strongest to weakest."""
+    candidates: list[str] = []
+
+    def add(value: Any) -> None:
+        clean = str(value or "").strip()
+        if clean and clean.casefold() not in {item.casefold() for item in candidates}:
+            candidates.append(clean)
+
+    if kind == QueryKind.FOUNDER_X:
+        add(target.label)
+    else:
+        add(query)
+    if kind in {QueryKind.PROJECT_X, QueryKind.FOUNDER_X}:
+        add(normalize_handle(query))
+    elif kind == QueryKind.DOMAIN:
+        add(_domain_stem(query))
+    add(target.x_handle)
+    add(target.label)
+    add(_domain_stem(str(target.metadata.get("domain") or "")))
+    if neon_company:
+        add(neon_company.get("x_handle"))
+        add(neon_company.get("name"))
+    if kind == QueryKind.FOUNDER_X:
+        add(query)
+        add(normalize_handle(query))
+    return candidates
+
+
+def _verified_surf_identity(project: dict[str, Any], candidates: list[str]) -> bool:
+    expected = {_identity_key(value) for value in candidates if _identity_key(value)}
+    actual = {
+        _identity_key(project.get(field)) for field in ("name", "slug", "symbol")
+        if _identity_key(project.get(field))
+    }
+    return bool(expected & actual)
 
 
 def funding_investors(funding: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
@@ -751,12 +794,20 @@ class EnrichedGraphRepository:
         surf_project = None
         surf_ref = surf_handle
         if self.surf and hasattr(self.surf, "search_project"):
+            identity_queries = _surf_identity_queries(query, actual_kind, target, neon_company)
+            attempted: list[str] = []
+            errors: list[str] = []
+            for surf_query in identity_queries:
+                attempted.append(surf_query)
+                try:
+                    candidate = self.surf.search_project(surf_query)  # type: ignore[attr-defined]
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(type(exc).__name__)
+                    continue
+                if candidate and _verified_surf_identity(candidate, identity_queries):
+                    surf_project = candidate
+                    break
             try:
-                # Preserve the user's company-name intent when Twenty resolves a fuzzy
-                # label (for example, "Ethena" -> "Ethenalabs"). Surf often knows the
-                # public project by the queried brand rather than the CRM label.
-                surf_query = query.strip() if actual_kind == QueryKind.COMPANY_NAME else target.label
-                surf_project = self.surf.search_project(surf_query)  # type: ignore[attr-defined]
                 if surf_project:
                     surf_ref = str(surf_project["id"])
                     surf_handle = str(surf_project.get("slug") or surf_handle)
@@ -774,6 +825,9 @@ class EnrichedGraphRepository:
                     "status": "ok" if surf_project else "not_found",
                     "project_id": surf_project.get("id") if surf_project else None,
                     "canonical_name": surf_project.get("name") if surf_project else None,
+                    "matched_query": attempted[-1] if surf_project and attempted else None,
+                    "queries_attempted": len(attempted),
+                    **({"lookup_errors": errors} if errors else {}),
                 }
             except Exception as exc:  # noqa: BLE001
                 self._source_diagnostics["surf_identity"] = {"status": "error", "error": type(exc).__name__}
