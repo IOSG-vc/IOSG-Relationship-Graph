@@ -40,6 +40,23 @@ class Surf:
         }]
 
 
+class NewsSurf:
+    def __init__(self):
+        self.searches = []
+
+    def search_project(self, query):
+        self.searches.append(query)
+        return {"id": "ethena-1", "name": "Ethena", "slug": "ethena"}
+
+    def ai_news(self, project_id):
+        assert project_id == "ethena-1"
+        return [{
+            "id": "news-1", "title": "Ethena update", "subtitle": "Mention the latest update.",
+            "signal_type": "funding", "timestamp": 123,
+            "sources": ["https://example.com/ethena"],
+        }]
+
+
 class Follows:
     def followers(self, handles):
         assert handles == ["ada"]
@@ -260,3 +277,13 @@ def test_outreach_context_requires_a_source_and_accepts_live_signal_types():
         "id": "mindshare", "title": "Momentum", "why_now": "Mention the recent attention.",
         "signal_type": "bn_mindshare", "timestamp": 124, "sources": ["https://x.com/example"],
     }]
+
+
+def test_surf_news_uses_original_company_query_when_twenty_label_is_fuzzy():
+    surf = NewsSurf()
+    repository = EnrichedGraphRepository(FuzzyWrongBase(), surf=surf)
+    result = IntroductionPathService(repository).search("Ethena", QueryKind.COMPANY_NAME)
+
+    assert surf.searches == ["Ethena"]
+    assert [item.title for item in result.outreach_context] == ["Ethena update"]
+    assert result.diagnostics["sources"]["ai_news"]["items"] == 1

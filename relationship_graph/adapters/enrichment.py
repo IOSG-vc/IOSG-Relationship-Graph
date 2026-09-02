@@ -752,7 +752,11 @@ class EnrichedGraphRepository:
         surf_ref = surf_handle
         if self.surf and hasattr(self.surf, "search_project"):
             try:
-                surf_project = self.surf.search_project(target.label)  # type: ignore[attr-defined]
+                # Preserve the user's company-name intent when Twenty resolves a fuzzy
+                # label (for example, "Ethena" -> "Ethenalabs"). Surf often knows the
+                # public project by the queried brand rather than the CRM label.
+                surf_query = query.strip() if actual_kind == QueryKind.COMPANY_NAME else target.label
+                surf_project = self.surf.search_project(surf_query)  # type: ignore[attr-defined]
                 if surf_project:
                     surf_ref = str(surf_project["id"])
                     surf_handle = str(surf_project.get("slug") or surf_handle)
