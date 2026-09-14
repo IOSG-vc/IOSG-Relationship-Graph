@@ -63,6 +63,27 @@ from `deals.iosg_x_following`. Those snapshots are expected to be synchronized f
 out of band; the request path does not download complete following lists. PostgreSQL support
 is included in the standard installation; use `pip install -e '.[dev]'` for development tools.
 
+### Telegram relationship metadata
+
+Apply `migrations/001_telegram_relationships.sql` to the database configured by
+`NEON_DATABASE_URL`. Telegram sync stores people and per-IOSG-member interaction counts
+without message contents or phone numbers. Human-entered company attribution lives in a
+separate annotations table, so later syncs cannot overwrite it.
+
+```bash
+python scripts/annotate_telegram_contact.py 403588306 \
+  --company Binance --domain binance.com --role "VIP team" \
+  --status probable --updated-by Darko
+```
+
+Use `probable` for inferred affiliations and `verified` only after confirming identity.
+The graph reads both statuses, with lower confidence for probable company edges.
+
+Approved Telegram groups can contribute weaker relationship evidence when an IOSG member
+and an annotated contact directly reply to each other. Group membership alone does not create
+an edge. The sync stores only group metadata, reply counts, and timestamps in
+`deals.telegram_groups` and `deals.telegram_group_connections`.
+
 When `SORSA_API_KEY` is set, public founder profiles are a no-path fallback: the service first
 ranks all normal Twenty, Surf, Neon, investor, referral, interaction, and follow paths, and does
 not call Sorsa if any path exists. If none exists, it checks up to three founders. Profiles are

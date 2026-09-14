@@ -137,6 +137,49 @@ class Neon(Follows):
         return len(people)
 
 
+class TelegramNeon(Follows):
+    def followers(self, handles):
+        return {}
+
+    def telegram_contacts(self, company_name, company_domain=None):
+        assert company_name == "Acme"
+        return [{
+            "telegram_user_id": 42,
+            "telegram_username": "ada",
+            "display_name": "Ada Lovelace",
+            "company_name": "Acme",
+            "role": "Founder",
+            "x_username": "ada_x",
+            "linkedin_url": "https://linkedin.com/in/ada",
+            "identity_status": "verified",
+            "iosg_member": "Darko",
+            "incoming_count": 6,
+            "outgoing_count": 5,
+            "last_interaction_at": "2026-09-14T12:00:00+00:00",
+            "shared_group_count": 2,
+        }]
+
+
+class TelegramGroupNeon(Follows):
+    def followers(self, handles):
+        return {}
+
+    def telegram_group_contacts(self, company_name, company_domain=None):
+        return [{
+            "telegram_user_id": 42,
+            "telegram_username": "ada",
+            "display_name": "Ada Lovelace",
+            "role": "Founder",
+            "identity_status": "verified",
+            "iosg_member": "Darko",
+            "replies_from_member": 2,
+            "replies_to_member": 3,
+            "last_interaction_at": "2026-09-14T12:00:00+00:00",
+            "telegram_group_id": 100,
+            "group_title": "Approved group",
+        }]
+
+
 def test_surf_and_neon_add_sourced_weak_follow_path():
     repository = EnrichedGraphRepository(BaseRepository(), Surf(), Follows())
     result = IntroductionPathService(repository).search("@acme", QueryKind.PROJECT_X)
@@ -146,6 +189,31 @@ def test_surf_and_neon_add_sourced_weak_follow_path():
     assert [edge.evidence_source for edge in result.recommended.edges] == ["sorsa_neon", "surf"]
     assert "not proof" in result.recommended.edges[0].evidence
     assert result.recommended.edges[1].confidence == 0.95
+
+
+def test_telegram_annotation_adds_ranked_company_path_without_message_contents():
+    repository = EnrichedGraphRepository(BaseRepository(), follows=TelegramNeon())
+    result = IntroductionPathService(repository).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.status == "ok"
+    assert result.recommended.path == ["Darko", "Ada Lovelace", "Acme"]
+    assert [edge.relationship for edge in result.recommended.edges] == [
+        "telegram_interaction",
+        "employee_of",
+    ]
+    assert result.diagnostics["sources"]["telegram"]["matched_relationships"] == 1
+    assert "no message contents" in result.recommended.edges[0].evidence
+
+
+def test_approved_group_replies_add_a_weaker_ranked_path():
+    repository = EnrichedGraphRepository(BaseRepository(), follows=TelegramGroupNeon())
+    result = IntroductionPathService(repository).search("Acme", QueryKind.COMPANY_NAME)
+
+    assert result.status == "ok"
+    assert result.recommended.path == ["Darko", "Ada Lovelace", "Acme"]
+    assert result.recommended.edges[0].relationship == "telegram_group_interaction"
+    assert result.recommended.edges[0].confidence == 0.60
+    assert result.diagnostics["sources"]["telegram_groups"]["matched_relationships"] == 1
 
 
 def test_sorsa_bio_discovers_former_company_for_surf_founder():
