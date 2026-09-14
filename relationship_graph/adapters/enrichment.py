@@ -310,6 +310,101 @@ class NeonFollowProvider:
                 })
             return result
 
+    def telegram_contacts(
+        self, company_name: str, company_domain: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read manually attributed Telegram relationships for one company."""
+        if not self.database_url or not company_name:
+            return []
+        import psycopg2
+
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select p.telegram_user_id, p.telegram_username, p.display_name,
+                       a.company_name, a.role, a.x_username, a.linkedin_url,
+                       a.identity_status, r.iosg_member, r.incoming_count,
+                       r.outgoing_count, r.last_interaction_at, r.shared_group_count
+                from deals.telegram_contact_annotations a
+                join deals.telegram_people p using (telegram_user_id)
+                join deals.telegram_relationships r using (telegram_user_id)
+                where p.is_active and a.identity_status in ('probable', 'verified')
+                  and (
+                    lower(a.company_name) = lower(%s)
+                    or (%s is not null and lower(a.company_domain) = lower(%s))
+                  )
+                order by a.identity_status desc, r.last_interaction_at desc nulls last
+                """,
+                (company_name, company_domain, company_domain),
+            )
+            return [
+                {
+                    "telegram_user_id": row[0],
+                    "telegram_username": row[1],
+                    "display_name": row[2],
+                    "company_name": row[3],
+                    "role": row[4],
+                    "x_username": row[5],
+                    "linkedin_url": row[6],
+                    "identity_status": row[7],
+                    "iosg_member": row[8],
+                    "incoming_count": row[9],
+                    "outgoing_count": row[10],
+                    "last_interaction_at": row[11].isoformat() if row[11] else None,
+                    "shared_group_count": row[12],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def telegram_group_contacts(
+        self, company_name: str, company_domain: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read approved-group reply relationships for annotated contacts."""
+        if not self.database_url or not company_name:
+            return []
+        import psycopg2
+
+        with psycopg2.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select p.telegram_user_id, p.telegram_username, p.display_name,
+                       a.role, a.x_username, a.linkedin_url, a.identity_status,
+                       c.iosg_member, c.replies_from_member, c.replies_to_member,
+                       c.last_interaction_at, g.telegram_group_id, g.title
+                from deals.telegram_contact_annotations a
+                join deals.telegram_people p using (telegram_user_id)
+                join deals.telegram_group_connections c using (telegram_user_id)
+                join deals.telegram_groups g using (telegram_group_id)
+                where p.is_active and g.approved_for_graph
+                  and a.identity_status in ('probable', 'verified')
+                  and (c.replies_from_member > 0 or c.replies_to_member > 0)
+                  and (
+                    lower(a.company_name) = lower(%s)
+                    or (%s is not null and lower(a.company_domain) = lower(%s))
+                  )
+                order by a.identity_status desc, c.last_interaction_at desc nulls last
+                """,
+                (company_name, company_domain, company_domain),
+            )
+            return [
+                {
+                    "telegram_user_id": row[0],
+                    "telegram_username": row[1],
+                    "display_name": row[2],
+                    "role": row[3],
+                    "x_username": row[4],
+                    "linkedin_url": row[5],
+                    "identity_status": row[6],
+                    "iosg_member": row[7],
+                    "replies_from_member": row[8],
+                    "replies_to_member": row[9],
+                    "last_interaction_at": row[10].isoformat() if row[10] else None,
+                    "telegram_group_id": row[11],
+                    "group_title": row[12],
+                }
+                for row in cursor.fetchall()
+            ]
+
     @staticmethod
     def _ensure_profile_tables(cursor: Any) -> None:
         cursor.execute(
@@ -783,6 +878,36 @@ class EnrichedGraphRepository:
                 self._nodes[target.id] = target
                 matches = [target]
         target = matches[0]
+        if self.follows and hasattr(self.follows, "telegram_contacts"):
+            try:
+                telegram_contacts = self.follows.telegram_contacts(  # type: ignore[attr-defined]
+                    target.label, target.metadata.get("domain")
+                )
+                self._add_telegram_contacts(target, telegram_contacts)
+                self._source_diagnostics["telegram"] = {
+                    "status": "ok" if telegram_contacts else "empty",
+                    "matched_relationships": len(telegram_contacts),
+                }
+            except Exception as exc:  # noqa: BLE001
+                self._source_diagnostics["telegram"] = {
+                    "status": "error",
+                    "error": type(exc).__name__,
+                }
+        if self.follows and hasattr(self.follows, "telegram_group_contacts"):
+            try:
+                group_contacts = self.follows.telegram_group_contacts(  # type: ignore[attr-defined]
+                    target.label, target.metadata.get("domain")
+                )
+                self._add_telegram_group_contacts(target, group_contacts)
+                self._source_diagnostics["telegram_groups"] = {
+                    "status": "ok" if group_contacts else "empty",
+                    "matched_relationships": len(group_contacts),
+                }
+            except Exception as exc:  # noqa: BLE001
+                self._source_diagnostics["telegram_groups"] = {
+                    "status": "error",
+                    "error": type(exc).__name__,
+                }
         if neon_company and hasattr(self.follows, "company_people"):
             try:
                 neon_people = self.follows.company_people(neon_company["id"])  # type: ignore[attr-defined]
@@ -1000,6 +1125,124 @@ class EnrichedGraphRepository:
                 evidence_source=f"{person.get('source') or 'unknown'}_neon",
                 observed_at=person.get("last_confirmed"),
             )
+
+    def _add_telegram_contacts(
+        self, target: Node, contacts: list[dict[str, Any]]
+    ) -> None:
+        """Add Telegram interactions plus manually reviewed company affiliations."""
+        affiliation_confidence = {"verified": 0.92, "probable": 0.62}
+        for contact in contacts:
+            telegram_id = int(contact["telegram_user_id"])
+            username = str(contact.get("telegram_username") or "").lstrip("@")
+            person_id = f"telegram:person:{telegram_id}"
+            person = Node(
+                id=person_id,
+                label=contact.get("display_name") or (f"@{username}" if username else str(telegram_id)),
+                kind="person",
+                x_handle=normalize_handle(contact.get("x_username") or "") or None,
+                linkedin_url=contact.get("linkedin_url"),
+                metadata={
+                    "telegram_user_id": telegram_id,
+                    "telegram_username": username or None,
+                    "role": contact.get("role"),
+                    "identity_status": contact.get("identity_status"),
+                    "source": "telegram_neon",
+                },
+            )
+            self._nodes[person_id] = person
+
+            member = str(contact.get("iosg_member") or "IOSG")
+            member_id = f"iosg:{re.sub(r'[^a-z0-9]', '', member.casefold())}"
+            self._nodes[member_id] = Node(id=member_id, label=member, kind="iosg_member")
+            incoming = int(contact.get("incoming_count") or 0)
+            outgoing = int(contact.get("outgoing_count") or 0)
+            two_way = incoming > 0 and outgoing > 0
+            interaction_confidence = 0.78 if two_way else 0.55
+            self._edges[f"neon:telegram:{member_id}:{telegram_id}"] = Edge(
+                id=f"neon:telegram:{member_id}:{telegram_id}",
+                source=member_id,
+                target=person_id,
+                relationship="telegram_interaction",
+                confidence=interaction_confidence,
+                evidence=(
+                    f"Telegram metadata records {incoming + outgoing} interaction(s) "
+                    f"between {member} and {person.label}; no message contents were stored."
+                ),
+                evidence_source="telegram_neon",
+                observed_at=contact.get("last_interaction_at"),
+            )
+
+            status = str(contact.get("identity_status") or "unverified")
+            self._edges[f"neon:telegram-affiliation:{telegram_id}:{target.id}"] = Edge(
+                id=f"neon:telegram-affiliation:{telegram_id}:{target.id}",
+                source=person_id,
+                target=target.id,
+                relationship="employee_of",
+                confidence=affiliation_confidence.get(status, 0.4),
+                evidence=(
+                    f"A manually reviewed Telegram annotation links {person.label} to "
+                    f"{target.label} as {contact.get('role') or 'a team member'} "
+                    f"({status})."
+                ),
+                evidence_source="telegram_annotation_neon",
+                observed_at=contact.get("last_interaction_at"),
+            )
+
+    def _add_telegram_group_contacts(
+        self, target: Node, contacts: list[dict[str, Any]]
+    ) -> None:
+        """Add reply-based edges from explicitly approved Telegram groups."""
+        affiliation_confidence = {"verified": 0.92, "probable": 0.62}
+        for contact in contacts:
+            telegram_id = int(contact["telegram_user_id"])
+            person_id = f"telegram:person:{telegram_id}"
+            username = str(contact.get("telegram_username") or "").lstrip("@")
+            person = self._nodes.get(person_id) or Node(
+                id=person_id,
+                label=contact.get("display_name") or (f"@{username}" if username else str(telegram_id)),
+                kind="person",
+                x_handle=normalize_handle(contact.get("x_username") or "") or None,
+                linkedin_url=contact.get("linkedin_url"),
+                metadata={"source": "telegram_group_neon", "role": contact.get("role")},
+            )
+            self._nodes[person_id] = person
+            member = str(contact.get("iosg_member") or "IOSG")
+            member_id = f"iosg:{re.sub(r'[^a-z0-9]', '', member.casefold())}"
+            self._nodes[member_id] = Node(id=member_id, label=member, kind="iosg_member")
+            outgoing = int(contact.get("replies_from_member") or 0)
+            incoming = int(contact.get("replies_to_member") or 0)
+            confidence = 0.60 if outgoing and incoming else 0.50
+            group_id = contact["telegram_group_id"]
+            self._edges[f"neon:telegram-group:{member_id}:{telegram_id}:{group_id}"] = Edge(
+                id=f"neon:telegram-group:{member_id}:{telegram_id}:{group_id}",
+                source=member_id,
+                target=person_id,
+                relationship="telegram_group_interaction",
+                confidence=confidence,
+                evidence=(
+                    f"Telegram metadata records {outgoing + incoming} direct reply interaction(s) "
+                    f"between {member} and {person.label} in an approved group; no message "
+                    "contents were stored."
+                ),
+                evidence_source="telegram_group_neon",
+                observed_at=contact.get("last_interaction_at"),
+            )
+            status = str(contact.get("identity_status") or "unverified")
+            affiliation_id = f"neon:telegram-affiliation:{telegram_id}:{target.id}"
+            if affiliation_id not in self._edges:
+                self._edges[affiliation_id] = Edge(
+                    id=affiliation_id,
+                    source=person_id,
+                    target=target.id,
+                    relationship="employee_of",
+                    confidence=affiliation_confidence.get(status, 0.4),
+                    evidence=(
+                        f"A manually reviewed Telegram annotation links {person.label} to "
+                        f"{target.label} as {contact.get('role') or 'a team member'} ({status})."
+                    ),
+                    evidence_source="telegram_annotation_neon",
+                    observed_at=contact.get("last_interaction_at"),
+                )
 
     def _add_surf_team(self, target: Node, members: list[dict[str, Any]]) -> None:
         observed = datetime.now(timezone.utc).isoformat()
